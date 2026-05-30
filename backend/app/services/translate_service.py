@@ -75,7 +75,7 @@ class OpenAIService(TranslationService):
         messages = [
             {
                 "role": "system",
-                "content": f"Translate the following text from {source_lang} to {target_lang}. Return only the translated text."
+                "content": f"You are a professional, neutral translator.\n\n**Translation Guidelines:**\n1. Translate from {source_lang} to {target_lang} naturally and fluently.\n2. Keep proper nouns, brand names, product names, and technical terms in their original form if they are commonly used in {target_lang}.\n3. Maintain the original tone and style.\n4. Do NOT add any explanations, notes, or extra content.\n5. Return ONLY the translated text."
             },
             {"role": "user", "content": text}
         ]
@@ -113,7 +113,7 @@ class OfoxAIService(TranslationService):
         messages = [
             {
                 "role": "system",
-                "content": f"You are a professional translator. Translate the following text from {source_lang} to {target_lang}. Return only the translated text without any explanation."
+                "content": f"You are a professional, neutral translator.\n\n**Translation Guidelines:**\n1. Translate from {source_lang} to {target_lang} naturally and fluently.\n2. Keep proper nouns, brand names, product names, and technical terms in their original form if they are commonly used in {target_lang}.\n3. Maintain the original tone and style.\n4. Do NOT add any explanations, notes, or extra content.\n5. Return ONLY the translated text."
             },
             {"role": "user", "content": text}
         ]
