@@ -140,7 +140,7 @@ class TranslationServiceFactory:
 
 ## 6. 项目结构
 ```
-PDFTranslate/
+LingoDoc/
 ├── frontend/
 │   ├── src/
 │   │   ├── app/

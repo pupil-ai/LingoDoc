@@ -135,7 +135,7 @@ export default function Home() {
 
       <footer className="bg-white border-t border-gray-100 mt-16">
         <div className="max-w-6xl mx-auto px-4 py-8 text-center text-gray-500 text-sm">
-          <p>PDF Translate - Fast, accurate PDF translation service</p>
+          <p>LingoDoc - Fast, accurate PDF translation service</p>
         </div>
       </footer>
     </div>
