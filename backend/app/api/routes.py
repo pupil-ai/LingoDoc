@@ -51,7 +51,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
         total_pages = pdf_service.get_total_pages(file_id)
         translation_tasks[task_id]["totalPages"] = total_pages
         
-        translator = TranslationServiceFactory.get("mock")
+        translator = TranslationServiceFactory.get("ofoxai")
+        print(f"[DEBUG] Translator type: {type(translator).__name__}")
         result = {"pages": []}
         
         for page_num in range(total_pages):
@@ -69,7 +70,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                         "text": block["text"],
                         "translatedText": translated_text,
                     })
-                except Exception:
+                except Exception as e:
+                    print(f"[DEBUG] Block translation failed: {str(e)}")
                     translated_blocks.append({
                         "bbox": block["bbox"],
                         "text": block["text"],
@@ -78,7 +80,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             
             try:
                 translated_full = await translator.translate(full_text, source_lang, target_lang)
-            except Exception:
+            except Exception as e:
+                print(f"[DEBUG] Full text translation failed: {str(e)}")
                 translated_full = full_text
             
             result["pages"].append({

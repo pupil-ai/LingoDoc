@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 import os
 import aiohttp
+from openai import AsyncOpenAI
 
 class TranslationService(ABC):
     @abstractmethod
@@ -95,6 +96,55 @@ class OpenAIService(TranslationService):
     def get_supported_languages(self) -> List[str]:
         return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
 
+class OfoxAIService(TranslationService):
+    def __init__(self):
+        pass
+    
+    async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
+        api_key = os.getenv("OFOXAI_API_KEY")
+        base_url = os.getenv("OFOXAI_BASE_URL", "https://api.ofox.ai/v1")
+        model = os.getenv("OFOXAI_MODEL", "openai/gpt-5.4-nano")
+        
+        if not api_key or api_key == "your_ofoxai_api_key_here":
+            raise ValueError("OfoxAI API key not configured. Please set OFOXAI_API_KEY in .env file")
+        
+        print(f"[DEBUG] OfoxAIService.translate called: text_length={len(text)}, source={source_lang}, target={target_lang}")
+        
+        messages = [
+            {
+                "role": "system",
+                "content": f"You are a professional translator. Translate the following text from {source_lang} to {target_lang}. Return only the translated text without any explanation."
+            },
+            {"role": "user", "content": text}
+        ]
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                data = {
+                    "model": model,
+                    "messages": messages,
+                    "temperature": 0.3,
+                }
+                async with session.post(f"{base_url}/chat/completions", headers=headers, json=data) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        print(f"[DEBUG] API error {response.status}: {error_text}")
+                        raise Exception(f"OfoxAI API error: {response.status} - {error_text}")
+                    result = await response.json()
+                    translated_text = result["choices"][0]["message"]["content"].strip()
+                    print(f"[DEBUG] OfoxAIService.translate success: result_length={len(translated_text)}, first_50_chars={translated_text[:50]}")
+                    return translated_text
+        except Exception as e:
+            print(f"[DEBUG] OfoxAIService.translate failed: {str(e)}")
+            raise
+    
+    def get_supported_languages(self) -> List[str]:
+        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+
 class MockTranslationService(TranslationService):
     """Mock service for testing without API keys"""
     
@@ -136,3 +186,4 @@ TranslationServiceFactory.register("mock", MockTranslationService())
 TranslationServiceFactory.register("deepl", DeepLService())
 TranslationServiceFactory.register("google", GoogleTranslateService())
 TranslationServiceFactory.register("openai", OpenAIService())
+TranslationServiceFactory.register("ofoxai", OfoxAIService())
