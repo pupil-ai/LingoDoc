@@ -15,6 +15,7 @@ export default function TranslatePage() {
   const router = useRouter();
   
   const fileId = searchParams.get('fileId');
+  const filename = searchParams.get('filename');
   const initialSourceLang = searchParams.get('sourceLang') || 'en';
   const initialTargetLang = searchParams.get('targetLang') || 'zh';
 
@@ -29,7 +30,9 @@ export default function TranslatePage() {
   });
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
+  const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [error, setError] = useState('');
+  const displayFileName = filename || fileId;
 
   const startTranslate = async () => {
     if (!fileId) return;
@@ -64,12 +67,15 @@ export default function TranslatePage() {
       setProgress(progressData);
 
       if (progressData.status === 'completed') {
+        setIsPreparingPreview(true);
         const resultData = await getTranslationResult(taskId);
         setResult(resultData);
+        setIsPreparingPreview(false);
       } else if (progressData.status === 'processing') {
         setTimeout(pollProgress, 2000);
       }
     } catch (err) {
+      setIsPreparingPreview(false);
       setError('Failed to get translation progress');
     }
   }, [taskId]);
@@ -111,9 +117,11 @@ export default function TranslatePage() {
           </button>
 
           <h1 className="font-display text-3xl font-bold text-gray-900 mb-2">
-            Translating PDF
+            Translating File
           </h1>
-          <p className="text-gray-600">File ID: {fileId}</p>
+          <p className="text-gray-600">
+            File: <span className="font-medium text-gray-800 break-all">{displayFileName}</span>
+          </p>
         </motion.div>
 
         <AnimatePresence mode="wait">
@@ -147,6 +155,20 @@ export default function TranslatePage() {
               </div>
 
               {taskId && <ProgressBar progress={progress} />}
+
+              {taskId && isPreparingPreview && (
+                <motion.div
+                  className="mt-6 bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg border border-white/60 text-center"
+                  initial={{ opacity: 0, y: 12 }}
+                  animate={{ opacity: 1, y: 0 }}
+                >
+                  <div className="mx-auto mb-4 h-10 w-10 rounded-full border-4 border-primary-100 border-t-primary-500 animate-spin" />
+                  <h3 className="text-lg font-semibold text-gray-800">Preparing File Preview</h3>
+                  <p className="mt-2 text-sm text-gray-500">
+                    Translation is complete. Generating the preview can take a few seconds for layout-heavy files.
+                  </p>
+                </motion.div>
+              )}
 
               {error && (
                 <motion.p

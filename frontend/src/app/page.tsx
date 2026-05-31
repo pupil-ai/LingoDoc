@@ -25,6 +25,7 @@ export default function Home() {
       if (response.success) {
         const params = new URLSearchParams({
           fileId: response.fileId,
+          filename: response.filename || file.name,
           sourceLang,
           targetLang,
         });

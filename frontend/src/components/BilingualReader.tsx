@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 interface BilingualReaderProps {
   taskId: string;
@@ -11,8 +11,23 @@ type DownloadType = 'bilingual' | 'translated';
 
 export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
   const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(true);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const [previewVersion] = useState(() => Date.now().toString());
-  const bilingualFileUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`;
+  const bilingualFileUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}#page=1&zoom=page-fit`;
+
+  const resetPreviewScroll = () => {
+    previewContainerRef.current?.scrollTo({ top: 0, left: 0 });
+
+    try {
+      previewFrameRef.current?.contentWindow?.scrollTo(0, 0);
+    } catch {
+      void 0;
+    }
+
+    setIsPreviewLoading(false);
+  };
 
   const handleDownload = async (downloadType: DownloadType) => {
     if (downloadingType) {
@@ -72,10 +87,22 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
       </div>
 
       <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
-        <div className="h-[800px] overflow-auto">
+        <div ref={previewContainerRef} className="relative h-[800px] overflow-auto bg-slate-100">
+          {isPreviewLoading && (
+            <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white/95 text-center">
+              <div className="mb-4 h-10 w-10 rounded-full border-4 border-primary-100 border-t-primary-500 animate-spin" />
+              <h3 className="text-lg font-semibold text-gray-800">Loading File Preview</h3>
+              <p className="mt-2 text-sm text-gray-500">
+                Preparing the document viewer. Large or layout-heavy files may take a moment.
+              </p>
+            </div>
+          )}
           <iframe
+            ref={previewFrameRef}
+            key={bilingualFileUrl}
             src={bilingualFileUrl}
-            className="w-full h-full"
+            onLoad={resetPreviewScroll}
+            className={`w-full h-full transition-opacity duration-300 ${isPreviewLoading ? 'opacity-0' : 'opacity-100'}`}
             title="Bilingual File Preview"
           />
         </div>
