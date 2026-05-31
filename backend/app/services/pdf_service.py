@@ -490,11 +490,88 @@ class PDFService:
             target_rect.y0 + marker_height,
         )
         try:
-            target_page.show_pdf_page(dest_rect, source_doc, page_num, clip=clip_rect)
+            pixmap = source_doc[page_num].get_pixmap(
+                matrix=fitz.Matrix(3, 3),
+                clip=clip_rect,
+                alpha=True,
+            )
+            target_page.insert_image(dest_rect, stream=pixmap.tobytes("png"))
             return marker_width
         except Exception as e:
             print(f"[DEBUG] Failed to copy marker: {str(e)}")
             return 0
+
+    def _measure_text_width(self, text: str, font_size: float, measure_font=None, font_name: str = "helv") -> float:
+        if not text:
+            return 0
+        if measure_font:
+            return measure_font.text_length(text, fontsize=font_size)
+        return fitz.get_text_length(text, fontname=font_name, fontsize=font_size)
+
+    def _wrap_text_for_rect(
+        self,
+        text: str,
+        max_width: float,
+        font_size: float,
+        measure_font=None,
+        font_name: str = "helv",
+    ) -> List[str]:
+        wrapped_lines = []
+        for paragraph in self._normalize_pdf_text(text).splitlines():
+            tokens = []
+            current_word = ""
+
+            for char in paragraph:
+                is_cjk = '\u4e00' <= char <= '\u9fff'
+                is_cjk_punctuation = char in "，。！？；：（）《》“”‘’、"
+                if char.isspace():
+                    if current_word:
+                        tokens.append(current_word)
+                        current_word = ""
+                    tokens.append(" ")
+                elif is_cjk or is_cjk_punctuation:
+                    if current_word:
+                        tokens.append(current_word)
+                        current_word = ""
+                    tokens.append(char)
+                else:
+                    current_word += char
+
+            if current_word:
+                tokens.append(current_word)
+
+            line = ""
+            for token in tokens:
+                if token == " " and not line:
+                    continue
+
+                candidate = f"{line}{token}" if line else token.strip()
+                if self._measure_text_width(candidate, font_size, measure_font, font_name) <= max_width:
+                    line = candidate
+                    continue
+
+                if line:
+                    wrapped_lines.append(line.rstrip())
+                    line = token.strip()
+
+                while (
+                    line
+                    and self._measure_text_width(line, font_size, measure_font, font_name) > max_width
+                    and len(line) > 1
+                ):
+                    split_index = len(line)
+                    while split_index > 1:
+                        head = line[:split_index]
+                        if self._measure_text_width(head, font_size, measure_font, font_name) <= max_width:
+                            break
+                        split_index -= 1
+                    wrapped_lines.append(line[:split_index].rstrip())
+                    line = line[split_index:].lstrip()
+
+            if line:
+                wrapped_lines.append(line.rstrip())
+
+        return wrapped_lines
 
     def _insert_fitted_textbox(
         self,
@@ -506,6 +583,8 @@ class PDFService:
         color,
         align=fitz.TEXT_ALIGN_LEFT,
         min_font_size: float = 5.5,
+        line_height: float = 1.28,
+        measure_font=None,
     ) -> bool:
         clean_text = self._normalize_pdf_text(text)
         if not clean_text or rect.width <= 0 or rect.height <= 0:
@@ -513,16 +592,29 @@ class PDFService:
 
         current_size = max(font_size, min_font_size)
         while current_size >= min_font_size:
-            result = page.insert_textbox(
-                rect,
+            lines = self._wrap_text_for_rect(
                 clean_text,
-                fontsize=current_size,
-                fontname=font_name,
-                color=color,
-                align=align,
+                rect.width,
+                current_size,
+                measure_font=measure_font,
+                font_name=font_name,
             )
-            if result >= 0:
+            line_step = current_size * line_height
+            required_height = current_size + max(len(lines) - 1, 0) * line_step
+
+            if lines and required_height <= rect.height:
+                baseline = rect.y0 + current_size
+                for line in lines:
+                    page.insert_text(
+                        (rect.x0, baseline),
+                        line,
+                        fontsize=current_size,
+                        fontname=font_name,
+                        color=color,
+                    )
+                    baseline += line_step
                 return True
+
             current_size *= 0.9
 
         return False
@@ -705,6 +797,8 @@ class PDFService:
 
             text_font_name = "custom_chinese" if font_registered else "helv"
             emoji_font_name = "custom_emoji" if emoji_registered else text_font_name
+            text_measure_font = fitz.Font(fontfile=chinese_font_path) if font_registered else fitz.Font("helv")
+            emoji_measure_font = fitz.Font(fontfile=emoji_font_path) if emoji_registered else text_measure_font
             text_blocks = [
                 block for block in page_data.get("textBlocks", [])
                 if block.get("type") == "text" and block.get("translatedText")
@@ -751,9 +845,11 @@ class PDFService:
                         bottom_limit = min(bottom_limit, next_y0 - 4)
                         break
 
-                min_height = base_font_size * 1.25
-                target_bottom = max(source_rect.y1 + 2, source_rect.y0 + min_height)
-                target_bottom = min(target_bottom, max(bottom_limit, source_rect.y1))
+                min_height = base_font_size * 1.35
+                target_bottom = min(
+                    original_rect.height - 12,
+                    max(bottom_limit, source_rect.y1 + 2, source_rect.y0 + min_height),
+                )
 
                 right_rect = fitz.Rect(
                     page_width + source_rect.x0,
@@ -799,6 +895,7 @@ class PDFService:
                             emoji_font_name,
                             base_font_size * 0.9,
                             fitz.utils.getColor("black"),
+                            measure_font=emoji_measure_font,
                         )
 
                     text_rect = fitz.Rect(
@@ -809,6 +906,7 @@ class PDFService:
                     )
 
                 try:
+                    line_height = 1.36 if self._has_cjk(content_text) else 1.2
                     success = self._insert_fitted_textbox(
                         new_page,
                         text_rect,
@@ -816,6 +914,8 @@ class PDFService:
                         text_font_name,
                         base_font_size,
                         style["color"],
+                        line_height=line_height,
+                        measure_font=text_measure_font,
                     )
                     if not success:
                         fallback_rect = fitz.Rect(
@@ -831,6 +931,8 @@ class PDFService:
                             text_font_name,
                             base_font_size * 0.9,
                             style["color"],
+                            line_height=line_height,
+                            measure_font=text_measure_font,
                         )
                 except Exception as e:
                     print(f"[DEBUG] Failed to insert text: {str(e)}")

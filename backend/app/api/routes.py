@@ -174,6 +174,13 @@ async def get_result(task_id: str):
 @router.get("/api/export/{task_id}")
 async def export_translation(task_id: str, format: str = "text", output_type: str = "translated", download: bool = False):
     try:
+        if format == "pdf_bilingual":
+            format = "pdf"
+            output_type = "bilingual"
+        elif format == "pdf_translated":
+            format = "pdf"
+            output_type = "translated"
+
         result = pdf_service.load_translation_result(task_id)
         file_id = result.get("fileId") or task_id
         
@@ -197,7 +204,7 @@ async def export_translation(task_id: str, format: str = "text", output_type: st
                 return Response(
                     pdf_bytes,
                     media_type="application/pdf",
-                    headers={"Content-Disposition": f"{disposition_type}; filename={task_id}_translated.pdf"},
+                    headers={"Content-Disposition": f'{disposition_type}; filename="{task_id}_translated.pdf"'},
                 )
             elif output_type == "bilingual":
                 # 左右对照版
@@ -205,7 +212,7 @@ async def export_translation(task_id: str, format: str = "text", output_type: st
                 return Response(
                     pdf_bytes,
                     media_type="application/pdf",
-                    headers={"Content-Disposition": f"{disposition_type}; filename={task_id}_bilingual.pdf"},
+                    headers={"Content-Disposition": f'{disposition_type}; filename="{task_id}_bilingual.pdf"'},
                 )
             else:
                 raise HTTPException(status_code=400, detail="Invalid output_type")

@@ -52,8 +52,15 @@ export async function exportTranslation(
   taskId: string,
   format: 'pdf_bilingual' | 'pdf_translated' | 'text'
 ): Promise<Blob> {
+  const params =
+    format === 'pdf_bilingual'
+      ? 'format=pdf&output_type=bilingual&download=true'
+      : format === 'pdf_translated'
+        ? 'format=pdf&output_type=translated&download=true'
+        : 'format=text';
+
   const response = await fetch(
-    `${API_BASE_URL}/api/export/${taskId}?format=${format}`
+    `${API_BASE_URL}/api/export/${taskId}?${params}`
   );
   return response.blob();
 }
