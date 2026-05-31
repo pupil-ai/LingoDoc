@@ -1,6 +1,7 @@
 import fitz
 import os
 import uuid
+import unicodedata
 from typing import List, Dict, Any
 
 
@@ -111,12 +112,14 @@ class PDFService:
                     })
             
             if block_text.strip():
+                clean_block_text = block_text.strip()
                 text_blocks.append({
                     "type": "text",
                     "bbox": {"x0": block_x0, "y0": block_y0, "x1": block_x1, "y1": block_y1},
-                    "text": block_text.strip(),
+                    "text": clean_block_text,
                     "font_size": block_font_size,
                     "lines": block_lines,
+                    "is_formula": self._is_formula_like_text(clean_block_text),
                 })
         
         text_blocks.sort(key=lambda b: (b["bbox"]["y0"], b["bbox"]["x0"]))
@@ -179,6 +182,77 @@ class PDFService:
     def _has_emoji(self, text: str) -> bool:
         return any(ord(char) > 0xFFFF for char in text)
 
+    def _is_formula_like_text(self, text: str) -> bool:
+        clean_text = self._normalize_pdf_text(text)
+        compact_text = "".join(char for char in clean_text if not char.isspace())
+        if len(compact_text) < 2:
+            return False
+
+        math_symbols = set("=<>±×÷√∑∫∞≈≠≤≥∂∆∇∈∉∪∩⊂⊆⊃⊇∧∨¬→←↔⇒⇔∴∵∝∠⊥∥∫∮∏∑^_{}[]|")
+        greek_ranges = (
+            ("\u0370", "\u03ff"),
+            ("\u1f00", "\u1fff"),
+        )
+
+        def is_greek(char: str) -> bool:
+            return any(start <= char <= end for start, end in greek_ranges)
+
+        math_count = sum(1 for char in compact_text if char in math_symbols or is_greek(char))
+        digit_count = sum(1 for char in compact_text if char.isdigit())
+        letter_count = sum(1 for char in compact_text if char.isalpha() or "\u4e00" <= char <= "\u9fff")
+        operator_count = sum(1 for char in compact_text if char in "+-*/=<>^_")
+        symbol_ratio = (math_count + digit_count + operator_count) / max(len(compact_text), 1)
+
+        if any(char in compact_text for char in "∑∫√≈≠≤≥±×÷∞∂∆∇") and letter_count <= len(compact_text) * 0.65:
+            return True
+        if "=" in compact_text and operator_count >= 1 and symbol_ratio >= 0.28:
+            return True
+        if math_count >= 2 and symbol_ratio >= 0.25:
+            return True
+        if len(compact_text) <= 28 and symbol_ratio >= 0.45 and letter_count <= digit_count + math_count + operator_count:
+            return True
+
+        return False
+
+    def is_translatable_text_block(self, block: Dict[str, Any]) -> bool:
+        if block.get("type") != "text":
+            return False
+        return not self._is_formula_like_text(block.get("text", ""))
+
+    def _is_marker_prefix_char(self, char: str) -> bool:
+        if not char:
+            return False
+        if char in {"\x00", "\ufffd", "\ufe0f", "\u200d"}:
+            return True
+        if ord(char) > 0xFFFF:
+            return True
+        return unicodedata.category(char) == "So" and char not in {"•", "·", "○", "●", "□"}
+
+    def _split_marker_prefix(self, text: str):
+        clean_text = self._normalize_pdf_text(text)
+        marker_chars = []
+        saw_marker = False
+        index = 0
+
+        while index < len(clean_text):
+            char = clean_text[index]
+            if char.isspace() and saw_marker:
+                index += 1
+                continue
+            if self._is_marker_prefix_char(char):
+                saw_marker = True
+                if char not in {"\x00", "\ufffd", "\ufe0f", "\u200d"}:
+                    marker_chars.append(char)
+                index += 1
+                continue
+            break
+
+        if not saw_marker:
+            return "", clean_text, False
+
+        marker = "".join(marker_chars) or "•"
+        return marker, clean_text[index:].strip(), True
+
     def _block_rect(self, block: Dict[str, Any]) -> fitz.Rect:
         bbox = block.get("bbox", {})
         return fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
@@ -187,7 +261,26 @@ class PDFService:
         text = self._normalize_pdf_text(block.get("text", ""))
         if not text:
             return False
-        return text[0] in ["\U0001F4A1", "\U0001F6E0", "\U0001F680", "\U0001F331"]
+
+        marker, heading_text, saw_marker = self._split_marker_prefix(text)
+        if not saw_marker:
+            return False
+
+        line_count = len([
+            line for line in block.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ])
+        if line_count > 2:
+            return False
+
+        rect = self._block_rect(block)
+        font_size = self._font_size_for_merge(block, rect)
+        if len(heading_text) > 60:
+            return False
+        if any(char in heading_text for char in ".。!?！？:：;；") and len(heading_text) > 20:
+            return False
+
+        return bool(marker) and font_size >= 10
 
     def _font_size_for_merge(self, block: Dict[str, Any], rect: fitz.Rect) -> float:
         font_size = float(block.get("font_size") or 0)
@@ -207,6 +300,8 @@ class PDFService:
 
     def _can_merge_text_blocks(self, previous: Dict[str, Any], current: Dict[str, Any]) -> bool:
         if previous.get("type") != "text" or current.get("type") != "text":
+            return False
+        if previous.get("is_formula") or current.get("is_formula"):
             return False
         if self._is_marker_heading(previous) or self._is_marker_heading(current):
             return False
@@ -278,7 +373,14 @@ class PDFService:
 
     def _is_translation_marker_line(self, line: str) -> bool:
         text = self._normalize_pdf_text(line)
-        return bool(text) and text[0] in ["\U0001F4A1", "\U0001F6E0", "\U0001F680", "\U0001F331"]
+        if not text:
+            return False
+
+        marker, heading_text, saw_marker = self._split_marker_prefix(text)
+        if not saw_marker or not marker:
+            return False
+
+        return bool(heading_text) and len(heading_text) <= 80
 
     def _split_page_translation_sections(self, translated_text: str) -> List[List[str]]:
         sections = []
@@ -340,6 +442,12 @@ class PDFService:
             self._is_translation_marker_line(section[0])
             for section in sections
         )
+        if not marker_indices and not has_translation_markers:
+            if len(sections) == len(updated_blocks):
+                for block, section in zip(updated_blocks, sections):
+                    block["translatedText"] = "\n".join(section)
+            return updated_blocks
+
         if marker_indices and not has_translation_markers:
             return updated_blocks
 
@@ -389,33 +497,152 @@ class PDFService:
             (color & 255) / 255,
         )
 
+    def _color_distance(self, first, second) -> float:
+        return sum((first[index] - second[index]) ** 2 for index in range(3)) ** 0.5
+
+    def _relative_luminance(self, color) -> float:
+        def channel_luminance(value: float) -> float:
+            return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+
+        red, green, blue = color
+        return (
+            0.2126 * channel_luminance(red) +
+            0.7152 * channel_luminance(green) +
+            0.0722 * channel_luminance(blue)
+        )
+
+    def _contrast_ratio(self, first, second) -> float:
+        first_luminance = self._relative_luminance(first)
+        second_luminance = self._relative_luminance(second)
+        lighter = max(first_luminance, second_luminance)
+        darker = min(first_luminance, second_luminance)
+        return (lighter + 0.05) / (darker + 0.05)
+
+    def _ensure_readable_color(self, color, background_color):
+        if not color or len(color) != 3:
+            return fitz.utils.getColor("black")
+
+        if not background_color or len(background_color) != 3:
+            return color
+
+        if self._contrast_ratio(color, background_color) < 1.6:
+            black = fitz.utils.getColor("black")
+            white = fitz.utils.getColor("white")
+            return (
+                black
+                if self._contrast_ratio(black, background_color) >= self._contrast_ratio(white, background_color)
+                else white
+            )
+        return color
+
+    def _estimate_background_color(self, page, rect: fitz.Rect, source_block: Dict[str, Any] = None):
+        text_colors = []
+        if source_block:
+            for line in source_block.get("lines", []):
+                for span in line.get("spans", []):
+                    if span.get("text", "").strip():
+                        text_colors.append(self._color_from_int(span.get("color", 0)))
+
+        clip_rect = fitz.Rect(
+            max(page.rect.x0, rect.x0 - 4),
+            max(page.rect.y0, rect.y0 - 4),
+            min(page.rect.x1, rect.x1 + 4),
+            min(page.rect.y1, rect.y1 + 4),
+        )
+        if clip_rect.is_empty:
+            return fitz.utils.getColor("white")
+
+        try:
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(0.5, 0.5), clip=clip_rect, alpha=False)
+        except Exception:
+            return fitz.utils.getColor("white")
+
+        counts = {}
+        fallback_counts = {}
+        channels = pixmap.n
+        if pixmap.width <= 0 or pixmap.height <= 0 or channels < 3:
+            return fitz.utils.getColor("white")
+
+        step = max(1, int(((pixmap.width * pixmap.height) / 5000) ** 0.5))
+        samples = pixmap.samples
+        def add_sample(aggregates, bucket, red, green, blue):
+            if bucket not in aggregates:
+                aggregates[bucket] = [0, 0, 0, 0]
+            aggregates[bucket][0] += 1
+            aggregates[bucket][1] += red
+            aggregates[bucket][2] += green
+            aggregates[bucket][3] += blue
+
+        for y in range(0, pixmap.height, step):
+            row_offset = y * pixmap.width * channels
+            for x in range(0, pixmap.width, step):
+                offset = row_offset + x * channels
+                red, green, blue = samples[offset], samples[offset + 1], samples[offset + 2]
+                rgb = (red / 255, green / 255, blue / 255)
+                bucket = (red // 16 * 16, green // 16 * 16, blue // 16 * 16)
+                add_sample(fallback_counts, bucket, red, green, blue)
+
+                if any(self._color_distance(rgb, text_color) < 0.18 for text_color in text_colors):
+                    continue
+                add_sample(counts, bucket, red, green, blue)
+
+        usable_counts = counts or fallback_counts
+        if not usable_counts:
+            return fitz.utils.getColor("white")
+
+        dominant = max(usable_counts, key=lambda bucket: usable_counts[bucket][0])
+        count, red_sum, green_sum, blue_sum = usable_counts[dominant]
+        background = (red_sum / count / 255, green_sum / count / 255, blue_sum / count / 255)
+        if min(background) > 0.94:
+            return fitz.utils.getColor("white")
+        return background
+
     def _rect_overlap_ratio(self, first: fitz.Rect, second: fitz.Rect) -> float:
         overlap = first & second
         if overlap.is_empty or first.get_area() <= 0:
             return 0
         return overlap.get_area() / first.get_area()
 
-    def _get_block_style(self, page, rect: fitz.Rect, fallback_font_size: float = 10) -> Dict[str, Any]:
+    def _get_block_style(
+        self,
+        page,
+        rect: fitz.Rect,
+        fallback_font_size: float = 10,
+        source_block: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
         sizes = []
         color_weights = {}
         fonts = []
 
-        text_info = page.get_text("dict")
-        for block in text_info.get("blocks", []):
-            for line in block.get("lines", []):
+        if source_block:
+            for line in source_block.get("lines", []):
                 for span in line.get("spans", []):
                     span_text = span.get("text", "").strip()
                     if not span_text:
                         continue
 
-                    span_rect = fitz.Rect(span["bbox"])
-                    if self._rect_overlap_ratio(span_rect, rect) < 0.2:
-                        continue
-
                     color = span.get("color", 0)
-                    sizes.append(span.get("size", fallback_font_size))
+                    sizes.append(span.get("font_size", span.get("size", fallback_font_size)))
                     color_weights[color] = color_weights.get(color, 0) + max(len(span_text), 1)
                     fonts.append(span.get("font", ""))
+
+        if not sizes:
+            text_info = page.get_text("dict")
+            for block in text_info.get("blocks", []):
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        span_text = span.get("text", "").strip()
+                        if not span_text:
+                            continue
+
+                        span_rect = fitz.Rect(span["bbox"])
+                        if self._rect_overlap_ratio(span_rect, rect) < 0.2:
+                            continue
+
+                        color = span.get("color", 0)
+                        sizes.append(span.get("size", fallback_font_size))
+                        color_weights[color] = color_weights.get(color, 0) + max(len(span_text), 1)
+                        fonts.append(span.get("font", ""))
 
         if sizes:
             sorted_sizes = sorted(sizes)
@@ -426,32 +653,131 @@ class PDFService:
         dominant_color = max(color_weights, key=color_weights.get) if color_weights else 0
         color = self._color_from_int(dominant_color) if color_weights else fitz.utils.getColor("black")
         font_name = fonts[0] if fonts else ""
+        background_color = self._estimate_background_color(page, rect, source_block)
 
         return {
             "font_size": max(font_size, 6),
-            "color": color,
+            "color": self._ensure_readable_color(color, background_color),
+            "background_color": background_color,
             "font_name": font_name,
         }
 
     def _split_leading_marker(self, translated_text: str, source_text: str):
-        marker_chars = ["\U0001F4A1", "\U0001F6E0", "\U0001F680", "\U0001F331"]
-        translated = self._normalize_pdf_text(translated_text)
-        source = self._normalize_pdf_text(source_text)
+        translated_marker, translated, translated_has_marker = self._split_marker_prefix(translated_text)
+        source_marker, _, source_has_marker = self._split_marker_prefix(source_text)
 
         marker = ""
-        for candidate in marker_chars:
-            if translated.startswith(candidate):
-                marker = candidate
-                translated = translated[len(candidate):].strip()
-                break
-
-        if not marker:
-            for candidate in marker_chars:
-                if source.startswith(candidate):
-                    marker = candidate
-                    break
+        if translated_has_marker:
+            marker = translated_marker
+        elif source_has_marker:
+            marker = source_marker
+            translated = self._normalize_pdf_text(translated_text)
 
         return marker, translated
+
+    def _insert_source_page_visual_layer(self, target_page, source_page, target_rect: fitz.Rect):
+        try:
+            pixmap = source_page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            target_page.insert_image(target_rect, stream=pixmap.tobytes("png"))
+            return
+        except Exception as e:
+            print(f"[DEBUG] Failed to insert source visual layer: {str(e)}")
+
+        target_page.draw_rect(
+            target_rect,
+            color=fitz.utils.getColor("white"),
+            fill=fitz.utils.getColor("white"),
+        )
+
+    def _should_preserve_marker_span(self, span_text: str) -> bool:
+        clean_text = self._normalize_pdf_text(span_text)
+        if not clean_text:
+            return True
+
+        marker, heading_text, saw_marker = self._split_marker_prefix(clean_text)
+        if saw_marker and marker and not heading_text:
+            return True
+
+        return clean_text in {"•", "·", "○", "●", "□", "-", "/", "\\", "|"}
+
+    def _cover_source_text_on_translation_side(
+        self,
+        target_page,
+        block: Dict[str, Any],
+        page_width: float,
+        fallback_rect: fitz.Rect,
+        fill_color,
+        preserve_marker: bool = False,
+    ):
+        span_rects = []
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                if preserve_marker and self._should_preserve_marker_span(span.get("text", "")):
+                    continue
+
+                bbox = span.get("bbox")
+                if not bbox:
+                    continue
+
+                try:
+                    span_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+                except Exception:
+                    continue
+
+                if not span_rect.is_empty:
+                    span_rects.append(span_rect)
+
+        if not span_rects:
+            span_rects = [fallback_rect]
+
+        for span_rect in span_rects:
+            cover_rect = fitz.Rect(
+                page_width + span_rect.x0 - 0.35,
+                span_rect.y0 - 0.35,
+                page_width + span_rect.x1 + 0.35,
+                span_rect.y1 + 0.35,
+            )
+            if cover_rect.is_empty:
+                continue
+
+            target_page.draw_rect(
+                cover_rect,
+                color=fill_color,
+                fill=fill_color,
+                overlay=True,
+            )
+
+    def _translation_start_x(self, block: Dict[str, Any], source_rect: fitz.Rect, font_size: float) -> float:
+        lines = [line for line in block.get("lines", []) if line.get("spans")]
+        if not lines:
+            return source_rect.x0
+
+        top_y = min(line.get("bbox", {}).get("y0", source_rect.y0) for line in lines)
+        spans = []
+        for line in lines:
+            line_bbox = line.get("bbox", {})
+            if line_bbox.get("y0", source_rect.y0) > top_y + font_size * 0.35:
+                continue
+            for span in line.get("spans", []):
+                text = self._normalize_pdf_text(span.get("text", ""))
+                bbox = span.get("bbox")
+                if not text or not bbox:
+                    continue
+                try:
+                    spans.append((text, fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])))
+                except Exception:
+                    continue
+
+        spans.sort(key=lambda item: item[1].x0)
+        for previous, current in zip(spans, spans[1:]):
+            previous_text, previous_rect = previous
+            _, current_rect = current
+            gap = current_rect.x0 - previous_rect.x1
+            previous_is_label = len(previous_text) <= 8 and previous_rect.width <= font_size * 3
+            if previous_is_label and gap >= font_size * 0.9:
+                return current_rect.x0
+
+        return source_rect.x0
 
     def _copy_source_marker(
         self,
@@ -731,7 +1057,7 @@ class PDFService:
                     print(f"[DEBUG] Failed to insert translated text: {str(e)}")
                     pass
         
-        pdf_bytes = doc.write()
+        pdf_bytes = doc.write(deflate=True, garbage=4)
         doc.close()
         
         return pdf_bytes
@@ -767,11 +1093,7 @@ class PDFService:
             new_page.show_pdf_page(fitz.Rect(0, 0, page_width, original_rect.height), src_doc, page_num)
 
             right_bg_rect = fitz.Rect(page_width, 0, page_width * 2, original_rect.height)
-            new_page.draw_rect(
-                right_bg_rect,
-                color=fitz.utils.getColor("white"),
-                fill=fitz.utils.getColor("white"),
-            )
+            self._insert_source_page_visual_layer(new_page, src_page, right_bg_rect)
             new_page.draw_line(
                 (page_width, 0),
                 (page_width, original_rect.height),
@@ -801,7 +1123,9 @@ class PDFService:
             emoji_measure_font = fitz.Font(fontfile=emoji_font_path) if emoji_registered else text_measure_font
             text_blocks = [
                 block for block in page_data.get("textBlocks", [])
-                if block.get("type") == "text" and block.get("translatedText")
+                if block.get("type") == "text"
+                and block.get("translatedText")
+                and not block.get("is_formula")
             ]
             text_blocks = self._merge_text_blocks(text_blocks)
             text_blocks = self._apply_page_level_translations(text_blocks, page_data.get("translated", ""))
@@ -822,7 +1146,7 @@ class PDFService:
                 if not content_text:
                     content_text = translated_text
 
-                style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10)
+                style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
                 base_font_size = float(block.get("font_size") or style["font_size"])
                 if self._has_cjk(content_text):
                     base_font_size *= 0.86
@@ -850,9 +1174,14 @@ class PDFService:
                     original_rect.height - 12,
                     max(bottom_limit, source_rect.y1 + 2, source_rect.y0 + min_height),
                 )
+                translation_start_x = (
+                    source_rect.x0
+                    if marker
+                    else self._translation_start_x(block, source_rect, base_font_size)
+                )
 
                 right_rect = fitz.Rect(
-                    page_width + source_rect.x0,
+                    page_width + translation_start_x,
                     max(0, source_rect.y0 - 1),
                     min(page_width * 2 - 24, page_width + source_rect.x1 + 2),
                     min(original_rect.height - 12, target_bottom),
@@ -860,44 +1189,18 @@ class PDFService:
                 if right_rect.width < base_font_size * 2:
                     right_rect.x1 = min(page_width * 2 - 24, right_rect.x0 + base_font_size * 4)
 
+                self._cover_source_text_on_translation_side(
+                    new_page,
+                    block,
+                    page_width,
+                    source_rect,
+                    style["background_color"],
+                    preserve_marker=bool(marker),
+                )
+
                 text_rect = right_rect
                 if marker:
                     marker_width = base_font_size * 1.35
-                    marker_rect = fitz.Rect(
-                        right_rect.x0,
-                        right_rect.y0,
-                        min(right_rect.x1, right_rect.x0 + marker_width),
-                        right_rect.y1,
-                    )
-                    new_page.draw_circle(
-                        (
-                            max(page_width + 4, right_rect.x0 - base_font_size * 0.65),
-                            right_rect.y0 + base_font_size * 0.58,
-                        ),
-                        max(base_font_size * 0.08, 1.1),
-                        color=fitz.utils.getColor("black"),
-                        fill=fitz.utils.getColor("black"),
-                    )
-
-                    copied_marker_width = self._copy_source_marker(
-                        new_page,
-                        src_doc,
-                        page_num,
-                        source_rect,
-                        marker_rect,
-                        base_font_size,
-                    )
-                    if copied_marker_width <= 0:
-                        self._insert_fitted_textbox(
-                            new_page,
-                            marker_rect,
-                            marker,
-                            emoji_font_name,
-                            base_font_size * 0.9,
-                            fitz.utils.getColor("black"),
-                            measure_font=emoji_measure_font,
-                        )
-
                     text_rect = fitz.Rect(
                         min(right_rect.x1, right_rect.x0 + marker_width),
                         right_rect.y0,
@@ -937,7 +1240,7 @@ class PDFService:
                 except Exception as e:
                     print(f"[DEBUG] Failed to insert text: {str(e)}")
 
-        pdf_bytes = doc.write()
+        pdf_bytes = doc.write(deflate=True, garbage=4)
         doc.close()
         src_doc.close()
 

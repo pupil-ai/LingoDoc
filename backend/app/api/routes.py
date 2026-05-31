@@ -71,6 +71,16 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                         "text": "",
                         "translatedText": "",
                     })
+                elif not pdf_service.is_translatable_text_block(block):
+                    translated_blocks.append({
+                        "type": "formula",
+                        "bbox": block["bbox"],
+                        "text": block["text"],
+                        "translatedText": "",
+                        "font_size": block.get("font_size"),
+                        "lines": block.get("lines", []),
+                        "is_formula": True,
+                    })
                 else:
                     # 文本块，逐块翻译
                     try:
@@ -84,6 +94,7 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                             "translatedText": translated_text,
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
+                            "is_formula": False,
                         })
                     except Exception as e:
                         safe_print(f"[DEBUG] Block translation failed: {str(e)}")
@@ -94,6 +105,7 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                             "translatedText": block["text"],
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
+                            "is_formula": False,
                         })
             
             # 整页翻译用于预览
