@@ -82,6 +82,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                             "bbox": block["bbox"],
                             "text": block["text"],
                             "translatedText": translated_text,
+                            "font_size": block.get("font_size"),
+                            "lines": block.get("lines", []),
                         })
                     except Exception as e:
                         safe_print(f"[DEBUG] Block translation failed: {str(e)}")
@@ -90,6 +92,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                             "bbox": block["bbox"],
                             "text": block["text"],
                             "translatedText": block["text"],
+                            "font_size": block.get("font_size"),
+                            "lines": block.get("lines", []),
                         })
             
             # 整页翻译用于预览
