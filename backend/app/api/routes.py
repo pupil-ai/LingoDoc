@@ -210,13 +210,22 @@ async def export_translation(task_id: str, format: str = "text", output_type: st
             
         elif format == "pdf":
             disposition_type = "attachment" if download else "inline"
+            pdf_headers = {
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "X-Content-Type-Options": "nosniff",
+            }
             if output_type == "translated":
                 # 纯译文版
                 pdf_bytes = pdf_service.generate_translated_pdf(file_id, result)
                 return Response(
                     pdf_bytes,
                     media_type="application/pdf",
-                    headers={"Content-Disposition": f'{disposition_type}; filename="{task_id}_translated.pdf"'},
+                    headers={
+                        **pdf_headers,
+                        "Content-Disposition": f'{disposition_type}; filename="{task_id}_translated.pdf"',
+                    },
                 )
             elif output_type == "bilingual":
                 # 左右对照版
@@ -224,7 +233,10 @@ async def export_translation(task_id: str, format: str = "text", output_type: st
                 return Response(
                     pdf_bytes,
                     media_type="application/pdf",
-                    headers={"Content-Disposition": f'{disposition_type}; filename="{task_id}_bilingual.pdf"'},
+                    headers={
+                        **pdf_headers,
+                        "Content-Disposition": f'{disposition_type}; filename="{task_id}_bilingual.pdf"',
+                    },
                 )
             else:
                 raise HTTPException(status_code=400, detail="Invalid output_type")

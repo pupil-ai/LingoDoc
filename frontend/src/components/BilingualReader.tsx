@@ -9,7 +9,8 @@ interface BilingualReaderProps {
 
 export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
   const [isDownloading, setIsDownloading] = useState(false);
-  const bilingualPdfUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual`;
+  const [previewVersion] = useState(() => Date.now().toString());
+  const bilingualPdfUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`;
 
   const handleDownload = async () => {
     if (isDownloading) {
@@ -18,7 +19,8 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
 
     setIsDownloading(true);
     try {
-      const response = await fetch(`${bilingualPdfUrl}&download=true`);
+      const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&download=true&v=${Date.now()}`;
+      const response = await fetch(downloadUrl, { cache: 'no-store' });
       if (!response.ok) {
         throw new Error('Failed to download bilingual PDF');
       }

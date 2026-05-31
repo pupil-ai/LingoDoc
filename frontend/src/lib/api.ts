@@ -60,7 +60,8 @@ export async function exportTranslation(
         : 'format=text';
 
   const response = await fetch(
-    `${API_BASE_URL}/api/export/${taskId}?${params}`
+    `${API_BASE_URL}/api/export/${taskId}?${params}&v=${Date.now()}`,
+    { cache: 'no-store' }
   );
   return response.blob();
 }

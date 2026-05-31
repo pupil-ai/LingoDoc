@@ -371,125 +371,6 @@ class PDFService:
                 merged_blocks.append(dict(block))
         return merged_blocks
 
-    def _is_translation_marker_line(self, line: str) -> bool:
-        text = self._normalize_pdf_text(line)
-        if not text:
-            return False
-
-        marker, heading_text, saw_marker = self._split_marker_prefix(text)
-        if not saw_marker or not marker:
-            return False
-
-        return bool(heading_text) and len(heading_text) <= 80
-
-    def _split_page_translation_sections(self, translated_text: str) -> List[List[str]]:
-        sections = []
-        current_lines = []
-
-        for line in (translated_text or "").splitlines():
-            clean_line = self._normalize_pdf_text(line)
-            if not clean_line or clean_line in ["/", "\\", "|", "-"]:
-                if current_lines and not self._is_translation_marker_line(current_lines[0]):
-                    sections.append(current_lines)
-                    current_lines = []
-                continue
-
-            if self._is_translation_marker_line(clean_line):
-                if current_lines:
-                    sections.append(current_lines)
-                current_lines = [clean_line]
-                continue
-
-            current_lines.append(clean_line)
-
-        if current_lines:
-            sections.append(current_lines)
-
-        return sections
-
-    def _assign_translation_to_body_blocks(self, body_blocks: List[Dict[str, Any]], body_parts: List[str]):
-        if not body_blocks or not body_parts:
-            return
-
-        if len(body_blocks) == 1:
-            body_blocks[0]["translatedText"] = "\n".join(body_parts)
-            return
-
-        for index, block in enumerate(body_blocks):
-            if index < len(body_parts):
-                block["translatedText"] = body_parts[index]
-
-        if len(body_parts) > len(body_blocks):
-            body_blocks[-1]["translatedText"] = "\n".join(
-                [body_blocks[-1].get("translatedText", "")] + body_parts[len(body_blocks):]
-            ).strip()
-
-    def _apply_page_level_translations(
-        self,
-        text_blocks: List[Dict[str, Any]],
-        translated_text: str,
-    ) -> List[Dict[str, Any]]:
-        sections = self._split_page_translation_sections(translated_text)
-        if not sections:
-            return text_blocks
-
-        updated_blocks = [dict(block) for block in text_blocks]
-        marker_indices = [
-            index for index, block in enumerate(updated_blocks)
-            if self._is_marker_heading(block)
-        ]
-        has_translation_markers = any(
-            self._is_translation_marker_line(section[0])
-            for section in sections
-        )
-        if not marker_indices and not has_translation_markers:
-            if len(sections) == len(updated_blocks):
-                for block, section in zip(updated_blocks, sections):
-                    block["translatedText"] = "\n".join(section)
-            return updated_blocks
-
-        if marker_indices and not has_translation_markers:
-            return updated_blocks
-
-        block_index = 0
-        section_index = 0
-
-        while (
-            section_index < len(sections)
-            and not self._is_translation_marker_line(sections[section_index][0])
-            and block_index < len(updated_blocks)
-        ):
-            if not self._is_marker_heading(updated_blocks[block_index]):
-                updated_blocks[block_index]["translatedText"] = "\n".join(sections[section_index])
-                section_index += 1
-            block_index += 1
-
-        for marker_position, marker_index in enumerate(marker_indices):
-            while (
-                section_index < len(sections)
-                and not self._is_translation_marker_line(sections[section_index][0])
-            ):
-                section_index += 1
-
-            if section_index >= len(sections):
-                break
-
-            section_lines = sections[section_index]
-            updated_blocks[marker_index]["translatedText"] = section_lines[0]
-            next_marker_index = (
-                marker_indices[marker_position + 1]
-                if marker_position + 1 < len(marker_indices)
-                else len(updated_blocks)
-            )
-            body_blocks = [
-                block for block in updated_blocks[marker_index + 1:next_marker_index]
-                if not self._is_marker_heading(block)
-            ]
-            self._assign_translation_to_body_blocks(body_blocks, section_lines[1:])
-            section_index += 1
-
-        return updated_blocks
-
     def _color_from_int(self, color: int):
         return (
             ((color >> 16) & 255) / 255,
@@ -603,6 +484,78 @@ class PDFService:
             return 0
         return overlap.get_area() / first.get_area()
 
+    def _is_bold_span(self, span: Dict[str, Any]) -> bool:
+        font_name = (span.get("font") or "").lower()
+        flags = int(span.get("flags") or 0)
+        bold_names = ["bold", "black", "heavy", "semibold", "demibold", "extrabold"]
+        return bool(flags & 16) or any(name in font_name for name in bold_names)
+
+    def _detect_block_alignment(self, page, rect: fitz.Rect, source_block: Dict[str, Any] = None) -> int:
+        page_width = page.rect.width
+        if page_width <= 0 or rect.width <= 0:
+            return fitz.TEXT_ALIGN_LEFT
+
+        if source_block:
+            line_rects = []
+            line_sizes = []
+            for line in source_block.get("lines", []):
+                if not self._normalize_pdf_text(line.get("text", "")):
+                    continue
+                bbox = line.get("bbox")
+                if not bbox:
+                    continue
+                try:
+                    line_rects.append(fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"]))
+                    if line.get("font_size"):
+                        line_sizes.append(float(line.get("font_size")))
+                except Exception:
+                    continue
+
+            clean_text = self._normalize_pdf_text(source_block.get("text", ""))
+            line_count = len(line_rects)
+            median_size = sorted(line_sizes)[len(line_sizes) // 2] if line_sizes else max(rect.height, 10)
+
+            if line_count > 1:
+                x0_range = max(line.x0 for line in line_rects) - min(line.x0 for line in line_rects)
+                center_range = (
+                    max(line.x0 + line.width / 2 for line in line_rects) -
+                    min(line.x0 + line.width / 2 for line in line_rects)
+                )
+                block_center = rect.x0 + rect.width / 2
+                page_center = page.rect.x0 + page_width / 2
+
+                if len(clean_text) > 80:
+                    return fitz.TEXT_ALIGN_LEFT
+                if center_range <= median_size * 0.8 and abs(block_center - page_center) <= page_width * 0.1:
+                    return fitz.TEXT_ALIGN_CENTER
+                if x0_range <= median_size * 0.8:
+                    return fitz.TEXT_ALIGN_LEFT
+
+            if line_count > 1 and len(clean_text) > 80:
+                return fitz.TEXT_ALIGN_LEFT
+
+        block_center = rect.x0 + rect.width / 2
+        page_center = page.rect.x0 + page_width / 2
+        center_delta = abs(block_center - page_center)
+        left_margin = max(0, rect.x0 - page.rect.x0)
+        right_margin = max(0, page.rect.x1 - rect.x1)
+
+        if (
+            center_delta <= page_width * 0.08
+            and abs(left_margin - right_margin) <= page_width * 0.18
+            and rect.width <= page_width * 0.85
+        ):
+            return fitz.TEXT_ALIGN_CENTER
+
+        if (
+            right_margin <= page_width * 0.08
+            and left_margin > right_margin * 2.5
+            and rect.width <= page_width * 0.75
+        ):
+            return fitz.TEXT_ALIGN_RIGHT
+
+        return fitz.TEXT_ALIGN_LEFT
+
     def _get_block_style(
         self,
         page,
@@ -613,6 +566,9 @@ class PDFService:
         sizes = []
         color_weights = {}
         fonts = []
+        bold_weight = 0
+        total_weight = 0
+        first_color = None
 
         if source_block:
             for line in source_block.get("lines", []):
@@ -622,9 +578,15 @@ class PDFService:
                         continue
 
                     color = span.get("color", 0)
+                    if first_color is None:
+                        first_color = color
+                    text_weight = max(len(span_text), 1)
                     sizes.append(span.get("font_size", span.get("size", fallback_font_size)))
-                    color_weights[color] = color_weights.get(color, 0) + max(len(span_text), 1)
+                    color_weights[color] = color_weights.get(color, 0) + text_weight
                     fonts.append(span.get("font", ""))
+                    total_weight += text_weight
+                    if self._is_bold_span(span):
+                        bold_weight += text_weight
 
         if not sizes:
             text_info = page.get_text("dict")
@@ -640,9 +602,15 @@ class PDFService:
                             continue
 
                         color = span.get("color", 0)
+                        if first_color is None:
+                            first_color = color
+                        text_weight = max(len(span_text), 1)
                         sizes.append(span.get("size", fallback_font_size))
-                        color_weights[color] = color_weights.get(color, 0) + max(len(span_text), 1)
+                        color_weights[color] = color_weights.get(color, 0) + text_weight
                         fonts.append(span.get("font", ""))
+                        total_weight += text_weight
+                        if self._is_bold_span(span):
+                            bold_weight += text_weight
 
         if sizes:
             sorted_sizes = sorted(sizes)
@@ -651,7 +619,18 @@ class PDFService:
             font_size = fallback_font_size
 
         dominant_color = max(color_weights, key=color_weights.get) if color_weights else 0
-        color = self._color_from_int(dominant_color) if color_weights else fitz.utils.getColor("black")
+        total_color_weight = sum(color_weights.values())
+        dominant_ratio = (
+            color_weights.get(dominant_color, 0) / total_color_weight
+            if total_color_weight
+            else 1
+        )
+        base_color = (
+            first_color
+            if first_color is not None and len(color_weights) > 1 and dominant_ratio < 0.75
+            else dominant_color
+        )
+        color = self._color_from_int(base_color) if color_weights else fitz.utils.getColor("black")
         font_name = fonts[0] if fonts else ""
         background_color = self._estimate_background_color(page, rect, source_block)
 
@@ -660,6 +639,8 @@ class PDFService:
             "color": self._ensure_readable_color(color, background_color),
             "background_color": background_color,
             "font_name": font_name,
+            "is_bold": bool(total_weight and bold_weight / total_weight >= 0.45),
+            "align": self._detect_block_alignment(page, rect, source_block),
         }
 
     def _split_leading_marker(self, translated_text: str, source_text: str):
@@ -731,11 +712,12 @@ class PDFService:
             span_rects = [fallback_rect]
 
         for span_rect in span_rects:
+            underline_padding = max(1.8, span_rect.height * 0.12)
             cover_rect = fitz.Rect(
-                page_width + span_rect.x0 - 0.35,
-                span_rect.y0 - 0.35,
-                page_width + span_rect.x1 + 0.35,
-                span_rect.y1 + 0.35,
+                page_width + span_rect.x0 - 0.6,
+                span_rect.y0 - 0.6,
+                page_width + span_rect.x1 + 0.6,
+                span_rect.y1 + underline_padding,
             )
             if cover_rect.is_empty:
                 continue
@@ -911,6 +893,7 @@ class PDFService:
         min_font_size: float = 5.5,
         line_height: float = 1.28,
         measure_font=None,
+        vertical_align: str = "top",
     ) -> bool:
         clean_text = self._normalize_pdf_text(text)
         if not clean_text or rect.width <= 0 or rect.height <= 0:
@@ -929,10 +912,32 @@ class PDFService:
             required_height = current_size + max(len(lines) - 1, 0) * line_step
 
             if lines and required_height <= rect.height:
-                baseline = rect.y0 + current_size
-                for line in lines:
+                top_offset = 0
+                if vertical_align == "middle":
+                    top_offset = max((rect.height - required_height) / 2, 0)
+                baseline = rect.y0 + top_offset + current_size
+
+                if align == fitz.TEXT_ALIGN_LEFT:
                     page.insert_text(
                         (rect.x0, baseline),
+                        lines,
+                        fontsize=current_size,
+                        lineheight=line_height,
+                        fontname=font_name,
+                        color=color,
+                    )
+                    return True
+
+                for line in lines:
+                    line_width = self._measure_text_width(line, current_size, measure_font, font_name)
+                    text_x = rect.x0
+                    if align == fitz.TEXT_ALIGN_CENTER:
+                        text_x = rect.x0 + max(rect.width - line_width, 0) / 2
+                    elif align == fitz.TEXT_ALIGN_RIGHT:
+                        text_x = rect.x1 - line_width
+                    text_x = max(rect.x0, min(text_x, rect.x1))
+                    page.insert_text(
+                        (text_x, baseline),
                         line,
                         fontsize=current_size,
                         fontname=font_name,
@@ -1070,14 +1075,17 @@ class PDFService:
         src_doc = fitz.open(input_path)
         doc = fitz.open()
 
-        chinese_font_path = self._find_existing_font([
-            "C:\\Windows\\Fonts\\simhei.ttf",
+        regular_chinese_font_path = self._find_existing_font([
             "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
             "C:\\Windows\\Fonts\\simkai.ttf",
         ])
-        emoji_font_path = self._find_existing_font([
-            "C:\\Windows\\Fonts\\seguiemj.ttf",
-            "C:\\Windows\\Fonts\\seguisym.ttf",
+        bold_chinese_font_path = self._find_existing_font([
+            "C:\\Windows\\Fonts\\msyhbd.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+            "C:\\Windows\\Fonts\\simsunb.ttf",
+            regular_chinese_font_path,
         ])
 
         for page_data in translation_result["pages"]:
@@ -1101,34 +1109,49 @@ class PDFService:
                 width=1.0,
             )
 
-            font_registered = False
-            if chinese_font_path:
+            regular_font_registered = False
+            if regular_chinese_font_path:
                 try:
-                    new_page.insert_font(fontfile=chinese_font_path, fontname="custom_chinese")
-                    font_registered = True
+                    new_page.insert_font(fontfile=regular_chinese_font_path, fontname="custom_chinese_regular")
+                    regular_font_registered = True
                 except Exception as e:
                     print(f"[DEBUG] Failed to register font: {str(e)}")
 
-            emoji_registered = False
-            if emoji_font_path:
+            bold_font_registered = False
+            if bold_chinese_font_path:
                 try:
-                    new_page.insert_font(fontfile=emoji_font_path, fontname="custom_emoji")
-                    emoji_registered = True
+                    new_page.insert_font(fontfile=bold_chinese_font_path, fontname="custom_chinese_bold")
+                    bold_font_registered = True
                 except Exception as e:
-                    print(f"[DEBUG] Failed to register emoji font: {str(e)}")
+                    print(f"[DEBUG] Failed to register bold font: {str(e)}")
 
-            text_font_name = "custom_chinese" if font_registered else "helv"
-            emoji_font_name = "custom_emoji" if emoji_registered else text_font_name
-            text_measure_font = fitz.Font(fontfile=chinese_font_path) if font_registered else fitz.Font("helv")
-            emoji_measure_font = fitz.Font(fontfile=emoji_font_path) if emoji_registered else text_measure_font
+            regular_font_name = "custom_chinese_regular" if regular_font_registered else "helv"
+            bold_font_name = "custom_chinese_bold" if bold_font_registered else regular_font_name
+            try:
+                regular_measure_font = (
+                    fitz.Font(fontfile=regular_chinese_font_path)
+                    if regular_font_registered
+                    else fitz.Font("helv")
+                )
+            except Exception:
+                regular_measure_font = fitz.Font("helv")
+            try:
+                bold_measure_font = (
+                    fitz.Font(fontfile=bold_chinese_font_path)
+                    if bold_font_registered
+                    else regular_measure_font
+                )
+            except Exception:
+                bold_measure_font = regular_measure_font
+
             text_blocks = [
                 block for block in page_data.get("textBlocks", [])
                 if block.get("type") == "text"
                 and block.get("translatedText")
                 and not block.get("is_formula")
+                and self.is_translatable_text_block(block)
             ]
             text_blocks = self._merge_text_blocks(text_blocks)
-            text_blocks = self._apply_page_level_translations(text_blocks, page_data.get("translated", ""))
 
             for index, block in enumerate(text_blocks):
                 bbox = block.get("bbox", {})
@@ -1140,6 +1163,10 @@ class PDFService:
                 if source_rect.is_empty or source_rect.width <= 0 or source_rect.height <= 0:
                     continue
 
+                source_line_count = len([
+                    line for line in block.get("lines", [])
+                    if self._normalize_pdf_text(line.get("text", ""))
+                ])
                 translated_text = self._normalize_pdf_text(block.get("translatedText", ""))
                 source_text = self._normalize_pdf_text(block.get("text", ""))
                 marker, content_text = self._split_leading_marker(translated_text, source_text)
@@ -1147,6 +1174,8 @@ class PDFService:
                     content_text = translated_text
 
                 style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
+                text_font_name = bold_font_name if style["is_bold"] else regular_font_name
+                text_measure_font = bold_measure_font if style["is_bold"] else regular_measure_font
                 base_font_size = float(block.get("font_size") or style["font_size"])
                 if self._has_cjk(content_text):
                     base_font_size *= 0.86
@@ -1209,7 +1238,19 @@ class PDFService:
                     )
 
                 try:
-                    line_height = 1.36 if self._has_cjk(content_text) else 1.2
+                    line_height = 1.42 if self._has_cjk(content_text) and len(content_text) > 80 else 1.36 if self._has_cjk(content_text) else 1.2
+                    text_align = fitz.TEXT_ALIGN_LEFT if marker else style["align"]
+                    vertical_align = (
+                        "middle"
+                        if (
+                            source_line_count == 1
+                            and len(content_text) <= 40
+                            and base_font_size <= 42
+                            and source_rect.height >= base_font_size * 1.8
+                        )
+                        else "top"
+                    )
+                    min_readable_size = max(6.5, base_font_size * (0.70 if len(content_text) > 140 else 0.76))
                     success = self._insert_fitted_textbox(
                         new_page,
                         text_rect,
@@ -1217,8 +1258,11 @@ class PDFService:
                         text_font_name,
                         base_font_size,
                         style["color"],
+                        align=text_align,
+                        min_font_size=min_readable_size,
                         line_height=line_height,
                         measure_font=text_measure_font,
+                        vertical_align=vertical_align,
                     )
                     if not success:
                         fallback_rect = fitz.Rect(
@@ -1234,8 +1278,11 @@ class PDFService:
                             text_font_name,
                             base_font_size * 0.9,
                             style["color"],
+                            align=text_align,
+                            min_font_size=max(5.8, base_font_size * 0.62),
                             line_height=line_height,
                             measure_font=text_measure_font,
+                            vertical_align=vertical_align,
                         )
                 except Exception as e:
                     print(f"[DEBUG] Failed to insert text: {str(e)}")
