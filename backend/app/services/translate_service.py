@@ -1,8 +1,19 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 import os
+import sys
 import aiohttp
 from openai import AsyncOpenAI
+
+
+def safe_print(msg: str):
+    """安全地打印，避免 Windows 下 emoji 编码问题"""
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        # Windows GBK 编码问题，忽略无法编码的字符
+        safe_msg = msg.encode(sys.stdout.encoding, errors='ignore').decode(sys.stdout.encoding)
+        print(safe_msg)
 
 class TranslationService(ABC):
     @abstractmethod
@@ -108,7 +119,7 @@ class OfoxAIService(TranslationService):
         if not api_key or api_key == "your_ofoxai_api_key_here":
             raise ValueError("OfoxAI API key not configured. Please set OFOXAI_API_KEY in .env file")
         
-        print(f"[DEBUG] OfoxAIService.translate called: text_length={len(text)}, source={source_lang}, target={target_lang}")
+        safe_print(f"[DEBUG] OfoxAIService.translate called: text_length={len(text)}, source={source_lang}, target={target_lang}")
         
         messages = [
             {
@@ -132,14 +143,16 @@ class OfoxAIService(TranslationService):
                 async with session.post(f"{base_url}/chat/completions", headers=headers, json=data) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        print(f"[DEBUG] API error {response.status}: {error_text}")
+                        safe_print(f"[DEBUG] API error {response.status}: {error_text}")
                         raise Exception(f"OfoxAI API error: {response.status} - {error_text}")
                     result = await response.json()
                     translated_text = result["choices"][0]["message"]["content"].strip()
-                    print(f"[DEBUG] OfoxAIService.translate success: result_length={len(translated_text)}, first_50_chars={translated_text[:50]}")
+                    # 安全地打印日志
+                    safe_translated = translated_text.encode('utf-8', errors='ignore').decode('utf-8')
+                    safe_print(f"[DEBUG] OfoxAIService.translate success: result_length={len(translated_text)}, first_50_chars={safe_translated[:50]}")
                     return translated_text
         except Exception as e:
-            print(f"[DEBUG] OfoxAIService.translate failed: {str(e)}")
+            safe_print(f"[DEBUG] OfoxAIService.translate failed: {str(e)}")
             raise
     
     def get_supported_languages(self) -> List[str]:

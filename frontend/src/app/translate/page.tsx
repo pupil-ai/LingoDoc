@@ -177,7 +177,7 @@ export default function TranslatePage() {
                 </div>
               </div>
 
-              <BilingualReader pages={result.pages} />
+              <BilingualReader taskId={taskId!} fileId={fileId!} />
             </motion.div>
           )}
         </AnimatePresence>

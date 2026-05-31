@@ -1,5 +1,5 @@
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel
 from typing import Dict, Any
 import uuid
@@ -7,7 +7,7 @@ import asyncio
 import os
 
 from app.services.pdf_service import PDFService
-from app.services.translate_service import TranslationServiceFactory
+from app.services.translate_service import TranslationServiceFactory, safe_print
 
 router = APIRouter()
 
@@ -52,8 +52,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
         translation_tasks[task_id]["totalPages"] = total_pages
         
         translator = TranslationServiceFactory.get("ofoxai")
-        print(f"[DEBUG] Translator type: {type(translator).__name__}")
-        result = {"pages": []}
+        safe_print(f"[DEBUG] Translator type: {type(translator).__name__}")
+        result = {"pages": [], "fileId": file_id}
         
         for page_num in range(total_pages):
             text_blocks = pdf_service.extract_text_blocks(file_id, page_num)
@@ -61,27 +61,42 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             
             translated_blocks = []
             for block in text_blocks:
-                try:
-                    translated_text = await translator.translate(
-                        block["text"], source_lang, target_lang
-                    )
+                block_type = block.get("type", "text")
+                
+                if block_type == "image":
+                    # 图片块，不翻译
                     translated_blocks.append({
+                        "type": "image",
                         "bbox": block["bbox"],
-                        "text": block["text"],
-                        "translatedText": translated_text,
+                        "text": "",
+                        "translatedText": "",
                     })
-                except Exception as e:
-                    print(f"[DEBUG] Block translation failed: {str(e)}")
-                    translated_blocks.append({
-                        "bbox": block["bbox"],
-                        "text": block["text"],
-                        "translatedText": block["text"],
-                    })
+                else:
+                    # 文本块，逐块翻译
+                    try:
+                        translated_text = await translator.translate(
+                            block["text"], source_lang, target_lang
+                        )
+                        translated_blocks.append({
+                            "type": "text",
+                            "bbox": block["bbox"],
+                            "text": block["text"],
+                            "translatedText": translated_text,
+                        })
+                    except Exception as e:
+                        safe_print(f"[DEBUG] Block translation failed: {str(e)}")
+                        translated_blocks.append({
+                            "type": "text",
+                            "bbox": block["bbox"],
+                            "text": block["text"],
+                            "translatedText": block["text"],
+                        })
             
+            # 整页翻译用于预览
             try:
                 translated_full = await translator.translate(full_text, source_lang, target_lang)
             except Exception as e:
-                print(f"[DEBUG] Full text translation failed: {str(e)}")
+                safe_print(f"[DEBUG] Full text translation failed: {str(e)}")
                 translated_full = full_text
             
             result["pages"].append({
@@ -153,9 +168,10 @@ async def get_result(task_id: str):
         raise HTTPException(status_code=404, detail="Result not found")
 
 @router.get("/api/export/{task_id}")
-async def export_translation(task_id: str, format: str = "text"):
+async def export_translation(task_id: str, format: str = "text", output_type: str = "translated", download: bool = False):
     try:
         result = pdf_service.load_translation_result(task_id)
+        file_id = result.get("fileId") or task_id
         
         if format == "text":
             content = ""
@@ -168,21 +184,44 @@ async def export_translation(task_id: str, format: str = "text"):
                 "success": True,
                 "content": content,
             })
-        
-        elif format == "pdf_translated":
-            file_id = result.get("fileId")
-            if file_id:
-                pdf_bytes = pdf_service.generate_bilingual_pdf(file_id, result)
-                return FileResponse(
+            
+        elif format == "pdf":
+            disposition_type = "attachment" if download else "inline"
+            if output_type == "translated":
+                # 纯译文版
+                pdf_bytes = pdf_service.generate_translated_pdf(file_id, result)
+                return Response(
                     pdf_bytes,
                     media_type="application/pdf",
-                    filename=f"{task_id}_translated.pdf",
+                    headers={"Content-Disposition": f"{disposition_type}; filename={task_id}_translated.pdf"},
+                )
+            elif output_type == "bilingual":
+                # 左右对照版
+                pdf_bytes = pdf_service.generate_bilingual_pdf(file_id, result)
+                return Response(
+                    pdf_bytes,
+                    media_type="application/pdf",
+                    headers={"Content-Disposition": f"{disposition_type}; filename={task_id}_bilingual.pdf"},
                 )
             else:
-                raise HTTPException(status_code=400, detail="File ID not found")
+                raise HTTPException(status_code=400, detail="Invalid output_type")
         
         else:
             raise HTTPException(status_code=400, detail="Invalid format")
     
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Result not found")
+
+
+@router.get("/api/files/{file_id}")
+async def get_original_file(file_id: str, download: bool = False):
+    file_path = pdf_service.get_file_path(file_id)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        filename=f"{file_id}.pdf",
+        content_disposition_type="attachment" if download else "inline",
+    )
