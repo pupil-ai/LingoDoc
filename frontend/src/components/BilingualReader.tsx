@@ -7,38 +7,40 @@ interface BilingualReaderProps {
   fileId: string;
 }
 
-export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
-  const [isDownloading, setIsDownloading] = useState(false);
-  const [previewVersion] = useState(() => Date.now().toString());
-  const bilingualPdfUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`;
+type DownloadType = 'bilingual' | 'translated';
 
-  const handleDownload = async () => {
-    if (isDownloading) {
+export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
+  const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
+  const [previewVersion] = useState(() => Date.now().toString());
+  const bilingualFileUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`;
+
+  const handleDownload = async (downloadType: DownloadType) => {
+    if (downloadingType) {
       return;
     }
 
-    setIsDownloading(true);
+    setDownloadingType(downloadType);
     try {
-      const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&download=true&v=${Date.now()}`;
+      const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=${downloadType}&download=true&v=${Date.now()}`;
       const response = await fetch(downloadUrl, { cache: 'no-store' });
       if (!response.ok) {
-        throw new Error('Failed to download bilingual PDF');
+        throw new Error('Failed to download file');
       }
 
       const blob = await response.blob();
-      const pdfBlob = blob.type === 'application/pdf'
+      const fileBlob = blob.type === 'application/pdf'
         ? blob
         : new Blob([blob], { type: 'application/pdf' });
-      const objectUrl = URL.createObjectURL(pdfBlob);
+      const objectUrl = URL.createObjectURL(fileBlob);
       const link = document.createElement('a');
       link.href = objectUrl;
-      link.download = `${taskId}_bilingual.pdf`;
+      link.download = `${taskId}_${downloadType}.pdf`;
       document.body.appendChild(link);
       link.click();
       link.remove();
       URL.revokeObjectURL(objectUrl);
     } finally {
-      setIsDownloading(false);
+      setDownloadingType(null);
     }
   };
 
@@ -52,11 +54,19 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={handleDownload}
-            disabled={isDownloading}
+            onClick={() => handleDownload('translated')}
+            disabled={!!downloadingType}
+            className="px-4 py-2 bg-white text-primary-600 border border-primary-200 rounded-lg hover:bg-primary-50 transition-colors text-sm font-medium disabled:opacity-50"
+          >
+            {downloadingType === 'translated' ? 'Downloading...' : 'Download Translated File'}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleDownload('bilingual')}
+            disabled={!!downloadingType}
             className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 transition-colors text-sm font-medium"
           >
-            {isDownloading ? 'Downloading...' : 'Download Bilingual PDF'}
+            {downloadingType === 'bilingual' ? 'Downloading...' : 'Download Bilingual File'}
           </button>
         </div>
       </div>
@@ -64,9 +74,9 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
       <div className="bg-white rounded-2xl shadow-lg overflow-hidden">
         <div className="h-[800px] overflow-auto">
           <iframe
-            src={bilingualPdfUrl}
+            src={bilingualFileUrl}
             className="w-full h-full"
-            title="Bilingual PDF"
+            title="Bilingual File Preview"
           />
         </div>
       </div>

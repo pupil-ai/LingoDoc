@@ -949,11 +949,265 @@ class PDFService:
             current_size *= 0.9
 
         return False
-    
+
+    def _get_translation_font_paths(self):
+        regular_chinese_font_path = self._find_existing_font([
+            "C:\\Windows\\Fonts\\msyh.ttc",
+            "C:\\Windows\\Fonts\\simsun.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+            "C:\\Windows\\Fonts\\simkai.ttf",
+        ])
+        bold_chinese_font_path = self._find_existing_font([
+            "C:\\Windows\\Fonts\\msyhbd.ttc",
+            "C:\\Windows\\Fonts\\simhei.ttf",
+            "C:\\Windows\\Fonts\\simsunb.ttf",
+            regular_chinese_font_path,
+        ])
+        return regular_chinese_font_path, bold_chinese_font_path
+
+    def _register_translation_fonts(self, page, regular_chinese_font_path: str, bold_chinese_font_path: str):
+        regular_font_registered = False
+        if regular_chinese_font_path:
+            try:
+                page.insert_font(fontfile=regular_chinese_font_path, fontname="custom_chinese_regular")
+                regular_font_registered = True
+            except Exception as e:
+                print(f"[DEBUG] Failed to register font: {str(e)}")
+
+        bold_font_registered = False
+        if bold_chinese_font_path:
+            try:
+                page.insert_font(fontfile=bold_chinese_font_path, fontname="custom_chinese_bold")
+                bold_font_registered = True
+            except Exception as e:
+                print(f"[DEBUG] Failed to register bold font: {str(e)}")
+
+        regular_font_name = "custom_chinese_regular" if regular_font_registered else "helv"
+        bold_font_name = "custom_chinese_bold" if bold_font_registered else regular_font_name
+        try:
+            regular_measure_font = (
+                fitz.Font(fontfile=regular_chinese_font_path)
+                if regular_font_registered
+                else fitz.Font("helv")
+            )
+        except Exception:
+            regular_measure_font = fitz.Font("helv")
+        try:
+            bold_measure_font = (
+                fitz.Font(fontfile=bold_chinese_font_path)
+                if bold_font_registered
+                else regular_measure_font
+            )
+        except Exception:
+            bold_measure_font = regular_measure_font
+
+        return regular_font_name, bold_font_name, regular_measure_font, bold_measure_font
+
+    def _get_translated_text_blocks(self, page_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        text_blocks = [
+            block for block in page_data.get("textBlocks", [])
+            if block.get("type") == "text"
+            and block.get("translatedText")
+            and not block.get("is_formula")
+            and self.is_translatable_text_block(block)
+        ]
+        return self._merge_text_blocks(text_blocks)
+
+    def _render_translated_text_blocks(
+        self,
+        target_page,
+        src_page,
+        page_data: Dict[str, Any],
+        original_rect: fitz.Rect,
+        x_offset: float,
+        target_right_edge: float,
+        regular_font_name: str,
+        bold_font_name: str,
+        regular_measure_font,
+        bold_measure_font,
+    ):
+        text_blocks = self._get_translated_text_blocks(page_data)
+
+        for index, block in enumerate(text_blocks):
+            bbox = block.get("bbox", {})
+            try:
+                source_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+            except Exception:
+                continue
+
+            if source_rect.is_empty or source_rect.width <= 0 or source_rect.height <= 0:
+                continue
+
+            source_line_count = len([
+                line for line in block.get("lines", [])
+                if self._normalize_pdf_text(line.get("text", ""))
+            ])
+            translated_text = self._normalize_pdf_text(block.get("translatedText", ""))
+            source_text = self._normalize_pdf_text(block.get("text", ""))
+            marker, content_text = self._split_leading_marker(translated_text, source_text)
+            if not content_text:
+                content_text = translated_text
+
+            style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
+            text_font_name = bold_font_name if style["is_bold"] else regular_font_name
+            text_measure_font = bold_measure_font if style["is_bold"] else regular_measure_font
+            base_font_size = float(block.get("font_size") or style["font_size"])
+            if self._has_cjk(content_text):
+                base_font_size *= 0.86
+            if marker:
+                base_font_size = max(base_font_size, style["font_size"] * 0.9)
+            base_font_size = max(min(base_font_size, source_rect.height * 0.95), 5.5)
+
+            bottom_limit = original_rect.height - 18
+            for next_block in text_blocks[index + 1:]:
+                next_bbox = next_block.get("bbox", {})
+                next_y0 = next_bbox.get("y0")
+                if next_y0 is None or next_y0 <= source_rect.y0 + 1:
+                    continue
+                horizontally_related = (
+                    next_bbox.get("x1", 0) >= source_rect.x0 - 12 and
+                    next_bbox.get("x0", 0) <= source_rect.x1 + 12
+                )
+                same_column = abs(next_bbox.get("x0", source_rect.x0) - source_rect.x0) < 80
+                if horizontally_related or same_column:
+                    bottom_limit = min(bottom_limit, next_y0 - 4)
+                    break
+
+            min_height = base_font_size * 1.35
+            target_bottom = min(
+                original_rect.height - 12,
+                max(bottom_limit, source_rect.y1 + 2, source_rect.y0 + min_height),
+            )
+            translation_start_x = (
+                source_rect.x0
+                if marker
+                else self._translation_start_x(block, source_rect, base_font_size)
+            )
+
+            target_rect = fitz.Rect(
+                x_offset + translation_start_x,
+                max(0, source_rect.y0 - 1),
+                min(target_right_edge - 24, x_offset + source_rect.x1 + 2),
+                min(original_rect.height - 12, target_bottom),
+            )
+            if target_rect.width < base_font_size * 2:
+                target_rect.x1 = min(target_right_edge - 24, target_rect.x0 + base_font_size * 4)
+
+            self._cover_source_text_on_translation_side(
+                target_page,
+                block,
+                x_offset,
+                source_rect,
+                style["background_color"],
+                preserve_marker=bool(marker),
+            )
+
+            text_rect = target_rect
+            if marker:
+                marker_width = base_font_size * 1.35
+                text_rect = fitz.Rect(
+                    min(target_rect.x1, target_rect.x0 + marker_width),
+                    target_rect.y0,
+                    target_rect.x1,
+                    target_rect.y1,
+                )
+
+            try:
+                line_height = 1.42 if self._has_cjk(content_text) and len(content_text) > 80 else 1.36 if self._has_cjk(content_text) else 1.2
+                text_align = fitz.TEXT_ALIGN_LEFT if marker else style["align"]
+                vertical_align = (
+                    "middle"
+                    if (
+                        source_line_count == 1
+                        and len(content_text) <= 40
+                        and base_font_size <= 42
+                        and source_rect.height >= base_font_size * 1.8
+                    )
+                    else "top"
+                )
+                min_readable_size = max(6.5, base_font_size * (0.70 if len(content_text) > 140 else 0.76))
+                success = self._insert_fitted_textbox(
+                    target_page,
+                    text_rect,
+                    content_text,
+                    text_font_name,
+                    base_font_size,
+                    style["color"],
+                    align=text_align,
+                    min_font_size=min_readable_size,
+                    line_height=line_height,
+                    measure_font=text_measure_font,
+                    vertical_align=vertical_align,
+                )
+                if not success:
+                    fallback_rect = fitz.Rect(
+                        text_rect.x0,
+                        text_rect.y0,
+                        target_right_edge - 30,
+                        min(original_rect.height - 12, max(text_rect.y1, bottom_limit)),
+                    )
+                    self._insert_fitted_textbox(
+                        target_page,
+                        fallback_rect,
+                        content_text,
+                        text_font_name,
+                        base_font_size * 0.9,
+                        style["color"],
+                        align=text_align,
+                        min_font_size=max(5.8, base_font_size * 0.62),
+                        line_height=line_height,
+                        measure_font=text_measure_font,
+                        vertical_align=vertical_align,
+                    )
+            except Exception as e:
+                print(f"[DEBUG] Failed to insert text: {str(e)}")
+
     def generate_translated_pdf(self, file_id: str, translation_result: Dict[str, Any]) -> bytes:
         input_path = self.get_file_path(file_id)
         if not os.path.exists(input_path):
             raise FileNotFoundError("File not found")
+
+        src_doc = fitz.open(input_path)
+        doc = fitz.open()
+        regular_chinese_font_path, bold_chinese_font_path = self._get_translation_font_paths()
+
+        for page_data in translation_result["pages"]:
+            page_num = page_data["pageNum"] - 1
+            if page_num >= len(src_doc):
+                continue
+
+            src_page = src_doc[page_num]
+            original_rect = src_page.rect
+            new_page = doc.new_page(width=original_rect.width, height=original_rect.height)
+            self._insert_source_page_visual_layer(
+                new_page,
+                src_page,
+                fitz.Rect(0, 0, original_rect.width, original_rect.height),
+            )
+            (
+                regular_font_name,
+                bold_font_name,
+                regular_measure_font,
+                bold_measure_font,
+            ) = self._register_translation_fonts(new_page, regular_chinese_font_path, bold_chinese_font_path)
+            self._render_translated_text_blocks(
+                new_page,
+                src_page,
+                page_data,
+                original_rect,
+                0,
+                original_rect.width,
+                regular_font_name,
+                bold_font_name,
+                regular_measure_font,
+                bold_measure_font,
+            )
+
+        pdf_bytes = doc.write(deflate=True, garbage=4)
+        doc.close()
+        src_doc.close()
+
+        return pdf_bytes
         
         doc = fitz.open(input_path)
         
