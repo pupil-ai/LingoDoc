@@ -42,9 +42,9 @@ export function Header() {
             <span className="font-display text-xl font-bold gradient-text">LingoDoc</span>
           </div>
           <nav className="hidden md:flex items-center gap-6">
-            <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">Home</a>
+            <a href="/" className="text-gray-600 hover:text-primary-600 transition-colors">Home</a>
             <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">Features</a>
-            <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">About</a>
+            <a href="/dashboard" className="text-gray-600 hover:text-primary-600 transition-colors">My Files</a>
           </nav>
           {isClerkConfigured ? (
             <HeaderAuthActions />

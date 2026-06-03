@@ -4,6 +4,7 @@ import type {
   TranslationResponse,
   TranslationProgress,
   TranslationResult,
+  MyFilesResponse,
 } from '@/types';
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -81,4 +82,13 @@ export async function exportTranslation(
     }
   );
   return response.blob();
+}
+
+export async function getMyFiles(token?: string | null): Promise<MyFilesResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/my/files`, {
+    headers: buildAuthHeaders(token),
+    cache: 'no-store',
+  });
+
+  return response.json();
 }

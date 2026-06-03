@@ -15,8 +15,8 @@ export default function RootLayout({
   const clerkPublishableKey = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
   return (
-    <html lang="en">
-      <body>
+    <html lang="en" suppressHydrationWarning>
+      <body suppressHydrationWarning>
         {clerkPublishableKey ? (
           <ClerkProvider publishableKey={clerkPublishableKey} dynamic>
             {children}

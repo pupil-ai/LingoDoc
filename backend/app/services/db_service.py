@@ -173,5 +173,41 @@ class DatabaseService:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_user_files(self, user_id: str) -> list[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    files.id,
+                    files.original_filename,
+                    files.file_size,
+                    files.total_pages,
+                    files.created_at,
+                    latest_task.id AS task_id,
+                    latest_task.source_lang,
+                    latest_task.target_lang,
+                    latest_task.status,
+                    latest_task.progress,
+                    latest_task.processed_pages,
+                    latest_task.error,
+                    latest_task.created_at AS task_created_at,
+                    latest_task.updated_at AS task_updated_at
+                FROM files
+                LEFT JOIN translation_tasks AS latest_task
+                    ON latest_task.id = (
+                        SELECT id
+                        FROM translation_tasks
+                        WHERE translation_tasks.file_id = files.id
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                    )
+                WHERE files.user_id = ?
+                ORDER BY files.created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
+
 
 db_service = DatabaseService()

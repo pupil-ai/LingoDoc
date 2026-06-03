@@ -22,6 +22,7 @@ export interface TranslationProgress {
   progress: number;
   processedPages: number;
   totalPages: number;
+  error?: string;
 }
 
 export interface TextBlock {
@@ -40,6 +41,28 @@ export interface PageResult {
 export interface TranslationResult {
   success: boolean;
   pages: PageResult[];
+}
+
+export interface MyFileRecord {
+  id: string;
+  original_filename: string;
+  file_size: number;
+  total_pages: number;
+  created_at: string;
+  task_id: string | null;
+  source_lang: string | null;
+  target_lang: string | null;
+  status: 'processing' | 'completed' | 'error' | null;
+  progress: number | null;
+  processed_pages: number | null;
+  error: string | null;
+  task_created_at: string | null;
+  task_updated_at: string | null;
+}
+
+export interface MyFilesResponse {
+  success: boolean;
+  files: MyFileRecord[];
 }
 
 export interface LanguageOption {

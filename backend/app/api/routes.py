@@ -105,6 +105,16 @@ async def upload_file(file: UploadFile = File(...), current_user: CurrentUser = 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.get("/api/my/files")
+async def list_my_files(current_user: CurrentUser = Depends(get_current_user)):
+    _sync_current_user(current_user)
+    files = db_service.list_user_files(current_user.id)
+    return JSONResponse({
+        "success": True,
+        "files": files,
+    })
+
 async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, target_lang: str, user_id: str):
     try:
         translation_tasks[task_id] = {

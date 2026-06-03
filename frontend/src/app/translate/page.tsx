@@ -36,12 +36,13 @@ function TranslatePageContent() {
   
   const fileId = searchParams.get('fileId');
   const filename = searchParams.get('filename');
+  const initialTaskId = searchParams.get('taskId');
   const initialSourceLang = searchParams.get('sourceLang') || 'en';
   const initialTargetLang = searchParams.get('targetLang') || 'zh';
 
   const [sourceLang, setSourceLang] = useState(initialSourceLang);
   const [targetLang, setTargetLang] = useState(initialTargetLang);
-  const [taskId, setTaskId] = useState<string | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(initialTaskId);
   const [progress, setProgress] = useState<TranslationProgress>({
     status: 'processing',
     progress: 0,
@@ -111,6 +112,38 @@ function TranslatePageContent() {
       pollProgress();
     }
   }, [taskId, pollProgress, progress.status]);
+
+  useEffect(() => {
+    async function loadExistingResult() {
+      if (!initialTaskId || !isLoaded || !isSignedIn || result) {
+        return;
+      }
+
+      setIsPreparingPreview(true);
+      setError('');
+
+      try {
+        const token = await getToken();
+        const progressData = await getTranslationProgress(initialTaskId, token);
+        setProgress(progressData);
+
+        if (progressData.status === 'completed') {
+          const resultData = await getTranslationResult(initialTaskId, token);
+          setResult(resultData);
+        } else if (progressData.status === 'processing') {
+          setTaskId(initialTaskId);
+        } else {
+          setError(progressData.error || 'Translation task failed');
+        }
+      } catch {
+        setError('Failed to load translation result');
+      } finally {
+        setIsPreparingPreview(false);
+      }
+    }
+
+    loadExistingResult();
+  }, [getToken, initialTaskId, isLoaded, isSignedIn, result]);
 
   useEffect(() => {
     if (!fileId) {
