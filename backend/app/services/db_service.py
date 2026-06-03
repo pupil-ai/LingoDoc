@@ -1,0 +1,177 @@
+import os
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class DatabaseService:
+    def __init__(self) -> None:
+        default_path = Path(__file__).resolve().parents[2] / "data" / "lingodoc.db"
+        self.database_path = Path(os.getenv("DATABASE_PATH", str(default_path)))
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.init_db()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    def init_db(self) -> None:
+        with self._connect() as connection:
+            connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS files (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    original_filename TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    total_pages INTEGER NOT NULL,
+                    storage_path TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS translation_tasks (
+                    id TEXT PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    source_lang TEXT NOT NULL,
+                    target_lang TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress REAL NOT NULL DEFAULT 0,
+                    processed_pages INTEGER NOT NULL DEFAULT 0,
+                    total_pages INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
+                CREATE INDEX IF NOT EXISTS idx_translation_tasks_user_id ON translation_tasks(user_id);
+                CREATE INDEX IF NOT EXISTS idx_translation_tasks_file_id ON translation_tasks(file_id);
+                """
+            )
+
+    def upsert_user(self, user_id: str, email: Optional[str] = None) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (id, email, created_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    email = COALESCE(excluded.email, users.email),
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, email, now, now),
+            )
+
+    def create_file(
+        self,
+        file_id: str,
+        user_id: str,
+        original_filename: str,
+        file_size: int,
+        total_pages: int,
+        storage_path: str,
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO files (
+                    id, user_id, original_filename, file_size, total_pages, storage_path, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (file_id, user_id, original_filename, file_size, total_pages, storage_path, now),
+            )
+
+    def get_file(self, file_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+        return dict(row) if row else None
+
+    def create_translation_task(
+        self,
+        task_id: str,
+        file_id: str,
+        user_id: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO translation_tasks (
+                    id, file_id, user_id, source_lang, target_lang, status,
+                    progress, processed_pages, total_pages, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, 'processing', 0, 0, 0, ?, ?)
+                """,
+                (task_id, file_id, user_id, source_lang, target_lang, now, now),
+            )
+
+    def update_translation_task(
+        self,
+        task_id: str,
+        *,
+        status: Optional[str] = None,
+        progress: Optional[float] = None,
+        processed_pages: Optional[int] = None,
+        total_pages: Optional[int] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        updates = ["updated_at = ?"]
+        values: list[Any] = [_utc_now()]
+
+        if status is not None:
+            updates.append("status = ?")
+            values.append(status)
+        if progress is not None:
+            updates.append("progress = ?")
+            values.append(progress)
+        if processed_pages is not None:
+            updates.append("processed_pages = ?")
+            values.append(processed_pages)
+        if total_pages is not None:
+            updates.append("total_pages = ?")
+            values.append(total_pages)
+        if error is not None:
+            updates.append("error = ?")
+            values.append(error)
+
+        values.append(task_id)
+
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE translation_tasks SET {', '.join(updates)} WHERE id = ?",
+                values,
+            )
+
+    def get_translation_task(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM translation_tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+
+db_service = DatabaseService()

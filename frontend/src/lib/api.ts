@@ -8,12 +8,17 @@ import type {
 
 const API_BASE_URL = 'http://localhost:8000';
 
-export async function uploadFile(file: File): Promise<UploadResponse> {
+function buildAuthHeaders(token?: string | null): HeadersInit {
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+export async function uploadFile(file: File, token?: string | null): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append('file', file);
 
   const response = await fetch(`${API_BASE_URL}/api/upload`, {
     method: 'POST',
+    headers: buildAuthHeaders(token),
     body: formData,
   });
 
@@ -21,12 +26,14 @@ export async function uploadFile(file: File): Promise<UploadResponse> {
 }
 
 export async function startTranslation(
-  request: TranslationRequest
+  request: TranslationRequest,
+  token?: string | null
 ): Promise<TranslationResponse> {
   const response = await fetch(`${API_BASE_URL}/api/translate`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...buildAuthHeaders(token),
     },
     body: JSON.stringify(request),
   });
@@ -35,22 +42,29 @@ export async function startTranslation(
 }
 
 export async function getTranslationProgress(
-  taskId: string
+  taskId: string,
+  token?: string | null
 ): Promise<TranslationProgress> {
-  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/progress`);
+  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/progress`, {
+    headers: buildAuthHeaders(token),
+  });
   return response.json();
 }
 
 export async function getTranslationResult(
-  taskId: string
+  taskId: string,
+  token?: string | null
 ): Promise<TranslationResult> {
-  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/result`);
+  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/result`, {
+    headers: buildAuthHeaders(token),
+  });
   return response.json();
 }
 
 export async function exportTranslation(
   taskId: string,
-  format: 'pdf_bilingual' | 'pdf_translated' | 'text'
+  format: 'pdf_bilingual' | 'pdf_translated' | 'text',
+  token?: string | null
 ): Promise<Blob> {
   const params =
     format === 'pdf_bilingual'
@@ -61,7 +75,10 @@ export async function exportTranslation(
 
   const response = await fetch(
     `${API_BASE_URL}/api/export/${taskId}?${params}&v=${Date.now()}`,
-    { cache: 'no-store' }
+    {
+      cache: 'no-store',
+      headers: buildAuthHeaders(token),
+    }
   );
   return response.blob();
 }

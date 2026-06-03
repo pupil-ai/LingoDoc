@@ -1,8 +1,29 @@
 'use client';
 
+import { SignInButton, UserButton, useAuth } from '@clerk/nextjs';
 import { motion } from 'framer-motion';
 
+function HeaderAuthActions() {
+  const { isSignedIn } = useAuth();
+
+  return (
+    <div className="flex items-center gap-3">
+      {isSignedIn ? (
+        <UserButton />
+      ) : (
+        <SignInButton mode="modal">
+          <button className="px-4 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 transition-colors text-sm font-medium">
+            Sign in
+          </button>
+        </SignInButton>
+      )}
+    </div>
+  );
+}
+
 export function Header() {
+  const isClerkConfigured = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
+
   return (
     <motion.header
       className="bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b border-gray-100"
@@ -25,6 +46,13 @@ export function Header() {
             <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">Features</a>
             <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">About</a>
           </nav>
+          {isClerkConfigured ? (
+            <HeaderAuthActions />
+          ) : (
+            <span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+              Clerk not configured
+            </span>
+          )}
         </div>
       </div>
     </motion.header>

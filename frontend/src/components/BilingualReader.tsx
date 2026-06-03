@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '@clerk/nextjs';
 
 interface BilingualReaderProps {
   taskId: string;
@@ -10,12 +11,59 @@ interface BilingualReaderProps {
 type DownloadType = 'bilingual' | 'translated';
 
 export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
+  const { getToken } = useAuth();
   const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
   const [isPreviewLoading, setIsPreviewLoading] = useState(true);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState('');
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
   const [previewVersion] = useState(() => Date.now().toString());
-  const bilingualFileUrl = `/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}#page=1&zoom=page-fit`;
+
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let isCancelled = false;
+
+    async function loadPreview() {
+      setIsPreviewLoading(true);
+      setPreviewError('');
+
+      try {
+        const token = await getToken();
+        const response = await fetch(`/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`, {
+          cache: 'no-store',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+
+        if (!response.ok) {
+          throw new Error('Failed to load preview');
+        }
+
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(
+          blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' })
+        );
+
+        if (!isCancelled) {
+          setPreviewUrl(`${objectUrl}#page=1&zoom=page-fit`);
+        }
+      } catch {
+        if (!isCancelled) {
+          setPreviewError('Failed to load file preview. Please try downloading the file instead.');
+          setIsPreviewLoading(false);
+        }
+      }
+    }
+
+    loadPreview();
+
+    return () => {
+      isCancelled = true;
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [getToken, previewVersion, taskId]);
 
   const resetPreviewScroll = () => {
     previewContainerRef.current?.scrollTo({ top: 0, left: 0 });
@@ -37,7 +85,11 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
     setDownloadingType(downloadType);
     try {
       const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=${downloadType}&download=true&v=${Date.now()}`;
-      const response = await fetch(downloadUrl, { cache: 'no-store' });
+      const token = await getToken();
+      const response = await fetch(downloadUrl, {
+        cache: 'no-store',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (!response.ok) {
         throw new Error('Failed to download file');
       }
@@ -97,14 +149,21 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
               </p>
             </div>
           )}
-          <iframe
-            ref={previewFrameRef}
-            key={bilingualFileUrl}
-            src={bilingualFileUrl}
-            onLoad={resetPreviewScroll}
-            className={`w-full h-full transition-opacity duration-300 ${isPreviewLoading ? 'opacity-0' : 'opacity-100'}`}
-            title="Bilingual File Preview"
-          />
+          {previewError && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/95 px-6 text-center text-sm font-medium text-red-500">
+              {previewError}
+            </div>
+          )}
+          {previewUrl && (
+            <iframe
+              ref={previewFrameRef}
+              key={previewUrl}
+              src={previewUrl}
+              onLoad={resetPreviewScroll}
+              className={`w-full h-full transition-opacity duration-300 ${isPreviewLoading ? 'opacity-0' : 'opacity-100'}`}
+              title="Bilingual File Preview"
+            />
+          )}
         </div>
       </div>
     </div>

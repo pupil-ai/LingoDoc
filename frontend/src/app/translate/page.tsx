@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { Header } from '@/components/Header';
 import { ProgressBar } from '@/components/ProgressBar';
@@ -10,9 +11,28 @@ import { LanguageSelector } from '@/components/LanguageSelector';
 import { startTranslation, getTranslationProgress, getTranslationResult } from '@/lib/api';
 import type { TranslationProgress, TranslationResult } from '@/types';
 
-export default function TranslatePage() {
+function ClerkSetupRequired() {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+      <Header />
+      <section className="max-w-xl mx-auto px-4 py-24">
+        <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
+          <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
+            Clerk setup required
+          </h1>
+          <p className="text-gray-600">
+            Add your Clerk publishable key to <span className="font-mono">frontend/.env.local</span> before translating files.
+          </p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TranslatePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   
   const fileId = searchParams.get('fileId');
   const filename = searchParams.get('filename');
@@ -36,16 +56,21 @@ export default function TranslatePage() {
 
   const startTranslate = async () => {
     if (!fileId) return;
+    if (!isSignedIn) {
+      setError('Please sign in before translating this file.');
+      return;
+    }
     
     setIsTranslating(true);
     setError('');
     
     try {
+      const token = await getToken();
       const response = await startTranslation({
         fileId,
         sourceLang,
         targetLang,
-      });
+      }, token);
       
       if (response.success) {
         setTaskId(response.taskId);
@@ -63,12 +88,13 @@ export default function TranslatePage() {
     if (!taskId) return;
 
     try {
-      const progressData = await getTranslationProgress(taskId);
+      const token = await getToken();
+      const progressData = await getTranslationProgress(taskId, token);
       setProgress(progressData);
 
       if (progressData.status === 'completed') {
         setIsPreparingPreview(true);
-        const resultData = await getTranslationResult(taskId);
+        const resultData = await getTranslationResult(taskId, token);
         setResult(resultData);
         setIsPreparingPreview(false);
       } else if (progressData.status === 'processing') {
@@ -78,7 +104,7 @@ export default function TranslatePage() {
       setIsPreparingPreview(false);
       setError('Failed to get translation progress');
     }
-  }, [taskId]);
+  }, [getToken, taskId]);
 
   useEffect(() => {
     if (taskId && progress.status === 'processing') {
@@ -94,6 +120,29 @@ export default function TranslatePage() {
 
   if (!fileId) {
     return null;
+  }
+
+  if (isLoaded && !isSignedIn) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+        <Header />
+        <section className="max-w-xl mx-auto px-4 py-24">
+          <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
+            <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
+              Sign in required
+            </h1>
+            <p className="text-gray-600 mb-6">
+              Please sign in to translate files and access your private results.
+            </p>
+            <SignInButton mode="modal">
+              <button className="px-6 py-3 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+                Sign in
+              </button>
+            </SignInButton>
+          </div>
+        </section>
+      </div>
+    );
   }
 
   return (
@@ -144,7 +193,7 @@ export default function TranslatePage() {
                 {!taskId && (
                   <motion.button
                     onClick={startTranslate}
-                    disabled={isTranslating}
+                    disabled={isTranslating || !isLoaded || !isSignedIn}
                     className="w-full mt-6 py-4 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
                     whileHover={{ scale: 1.01 }}
                     whileTap={{ scale: 0.99 }}
@@ -206,4 +255,12 @@ export default function TranslatePage() {
       </section>
     </div>
   );
+}
+
+export default function TranslatePage() {
+  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    return <ClerkSetupRequired />;
+  }
+
+  return <TranslatePageContent />;
 }

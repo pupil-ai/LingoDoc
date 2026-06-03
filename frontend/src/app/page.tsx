@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
+import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { Header } from '@/components/Header';
 import { FileUploader } from '@/components/FileUploader';
@@ -9,19 +10,49 @@ import { LanguageSelector } from '@/components/LanguageSelector';
 import { FeatureCard } from '@/components/FeatureCard';
 import { uploadFile } from '@/lib/api';
 
-export default function Home() {
+function ClerkSetupRequired() {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+      <Header />
+      <section className="max-w-xl mx-auto px-4 py-24">
+        <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
+          <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
+            Clerk setup required
+          </h1>
+          <p className="text-gray-600">
+            Add your Clerk publishable key to <span className="font-mono">frontend/.env.local</span> before using login and uploads.
+          </p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function HomeContent() {
   const router = useRouter();
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const [sourceLang, setSourceLang] = useState('en');
   const [targetLang, setTargetLang] = useState('zh');
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
   const handleFileUpload = async (file: File) => {
+    if (!isLoaded) {
+      setError('Please wait while your sign-in status finishes loading.');
+      return;
+    }
+
+    if (!isSignedIn) {
+      setError('Please sign in before uploading a file.');
+      return;
+    }
+
     setIsUploading(true);
     setError('');
 
     try {
-      const response = await uploadFile(file);
+      const token = await getToken();
+      const response = await uploadFile(file, token);
       if (response.success) {
         const params = new URLSearchParams({
           fileId: response.fileId,
@@ -87,7 +118,20 @@ export default function Home() {
             />
           </div>
 
-          <FileUploader onFileUpload={handleFileUpload} disabled={isUploading} />
+          <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded || !isSignedIn} />
+
+          {!isSignedIn && (
+            <div className="mt-6 rounded-2xl border border-primary-100 bg-primary-50/80 p-5 text-center">
+              <p className="mb-4 text-sm font-medium text-primary-800">
+                Sign in to upload documents and keep your translation files private.
+              </p>
+              <SignInButton mode="modal">
+                <button className="px-5 py-2 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
+                  Sign in to start
+                </button>
+              </SignInButton>
+            </div>
+          )}
 
           {error && (
             <motion.p
@@ -141,4 +185,12 @@ export default function Home() {
       </footer>
     </div>
   );
+}
+
+export default function Home() {
+  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    return <ClerkSetupRequired />;
+  }
+
+  return <HomeContent />;
 }

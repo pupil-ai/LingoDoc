@@ -12,46 +12,75 @@ export function FileUploader({ onFileUpload, disabled = false }: FileUploaderPro
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [error, setError] = useState('');
+
+  const isPdfFile = (file: File) => (
+    file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')
+  );
+
+  const selectPdfFile = (file: File) => {
+    if (disabled || isUploading) {
+      return;
+    }
+
+    if (!isPdfFile(file)) {
+      setSelectedFile(null);
+      setError('Only PDF files are supported right now.');
+      return;
+    }
+
+    setError('');
+    setSelectedFile(file);
+    handleFile(file);
+  };
 
   const handleDragOver = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
+    if (disabled || isUploading) {
+      return;
+    }
     setIsDragging(true);
-  }, []);
+  }, [disabled, isUploading]);
 
   const handleDragLeave = useCallback((e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
+    if (disabled || isUploading) {
+      return;
+    }
     setIsDragging(false);
-  }, []);
+  }, [disabled, isUploading]);
 
   const handleDrop = useCallback(
     (e: DragEvent<HTMLDivElement>) => {
       e.preventDefault();
       setIsDragging(false);
 
+      if (disabled || isUploading) {
+        return;
+      }
+
       const files = e.dataTransfer.files;
       if (files.length > 0) {
-        const file = files[0];
-        if (file.type === 'application/pdf') {
-          setSelectedFile(file);
-          handleFile(file);
-        }
+        selectPdfFile(files[0]);
       }
     },
-    []
+    [disabled, isUploading]
   );
 
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (disabled || isUploading) {
+        e.target.value = '';
+        return;
+      }
+
       const files = e.target.files;
       if (files && files.length > 0) {
-        const file = files[0];
-        if (file.type === 'application/pdf') {
-          setSelectedFile(file);
-          handleFile(file);
-        }
+        selectPdfFile(files[0]);
+        e.target.value = '';
       }
     },
-    []
+    [disabled, isUploading]
   );
 
   const handleFile = async (file: File) => {
@@ -127,12 +156,25 @@ export function FileUploader({ onFileUpload, disabled = false }: FileUploaderPro
 
         <input
           type="file"
-          accept="application/pdf"
+          accept="application/pdf,.pdf"
           onChange={handleFileChange}
           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
           disabled={disabled || isUploading}
         />
       </div>
+
+      <AnimatePresence>
+        {error && (
+          <motion.p
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            className="mt-4 text-center text-sm font-medium text-red-500"
+          >
+            {error}
+          </motion.p>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence>
         {selectedFile && (
