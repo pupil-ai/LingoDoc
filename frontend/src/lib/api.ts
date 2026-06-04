@@ -5,6 +5,7 @@ import type {
   TranslationProgress,
   TranslationResult,
   MyFilesResponse,
+  UsageResponse,
 } from '@/types';
 
 const API_BASE_URL = 'http://localhost:8000';
@@ -100,4 +101,13 @@ export async function getMyFiles(token?: string | null): Promise<MyFilesResponse
   });
 
   return parseJsonResponse<MyFilesResponse>(response, 'Failed to load files');
+}
+
+export async function getMyUsage(token?: string | null): Promise<UsageResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/me/usage`, {
+    headers: buildAuthHeaders(token),
+    cache: 'no-store',
+  });
+
+  return parseJsonResponse<UsageResponse>(response, 'Failed to load usage');
 }

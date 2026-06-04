@@ -8,8 +8,8 @@ import { Header } from '@/components/Header';
 import { ProgressBar } from '@/components/ProgressBar';
 import { BilingualReader } from '@/components/BilingualReader';
 import { LanguageSelector } from '@/components/LanguageSelector';
-import { startTranslation, getTranslationProgress, getTranslationResult } from '@/lib/api';
-import type { TranslationProgress, TranslationResult } from '@/types';
+import { startTranslation, getTranslationProgress, getTranslationResult, getMyUsage } from '@/lib/api';
+import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
 
 function ClerkSetupRequired() {
   return (
@@ -29,6 +29,16 @@ function ClerkSetupRequired() {
   );
 }
 
+function shouldShowPricingLink(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('plan') ||
+    normalized.includes('quota') ||
+    normalized.includes('remaining') ||
+    normalized.includes('upgrade')
+  );
+}
+
 function TranslatePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -36,6 +46,7 @@ function TranslatePageContent() {
   
   const fileId = searchParams.get('fileId');
   const filename = searchParams.get('filename');
+  const initialTotalPages = Number(searchParams.get('totalPages') || '0');
   const initialTaskId = searchParams.get('taskId');
   const initialSourceLang = searchParams.get('sourceLang') || 'en';
   const initialTargetLang = searchParams.get('targetLang') || 'zh';
@@ -52,13 +63,60 @@ function TranslatePageContent() {
   const [result, setResult] = useState<TranslationResult | null>(null);
   const [isTranslating, setIsTranslating] = useState(false);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
+  const [isUsageLoading, setIsUsageLoading] = useState(false);
   const [error, setError] = useState('');
   const displayFileName = filename || fileId;
+  const knownTotalPages = progress.totalPages || result?.totalPages || initialTotalPages || 0;
+  const isFreePlan = usage?.plan === 'free';
+  const freePreviewPages = Math.min(
+    usage?.freePreviewPages || 3,
+    knownTotalPages || usage?.freePreviewPages || 3
+  );
+  const exceedsPaidFileLimit = Boolean(
+    usage &&
+    !isFreePlan &&
+    knownTotalPages > 0 &&
+    usage.maxPagesPerFile > 0 &&
+    knownTotalPages > usage.maxPagesPerFile
+  );
+  const exceedsPaidMonthlyQuota = Boolean(
+    usage &&
+    !isFreePlan &&
+    knownTotalPages > 0 &&
+    usage.remainingPages !== null &&
+    knownTotalPages > usage.remainingPages
+  );
+  const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota;
+
+  const loadUsage = useCallback(async () => {
+    if (!isLoaded || !isSignedIn) {
+      setUsage(null);
+      return;
+    }
+
+    setIsUsageLoading(true);
+
+    try {
+      const token = await getToken({ skipCache: true });
+      const response = await getMyUsage(token);
+      setUsage(response.success ? response : null);
+    } catch {
+      setUsage(null);
+    } finally {
+      setIsUsageLoading(false);
+    }
+  }, [getToken, isLoaded, isSignedIn]);
 
   const startTranslate = async () => {
     if (!fileId) return;
     if (!isSignedIn) {
       setError('Please sign in before translating this file.');
+      return;
+    }
+
+    if (isStartBlocked) {
+      setError('This file exceeds your current plan limits. Please upgrade to continue.');
       return;
     }
     
@@ -112,6 +170,10 @@ function TranslatePageContent() {
       pollProgress();
     }
   }, [taskId, pollProgress, progress.status]);
+
+  useEffect(() => {
+    loadUsage();
+  }, [loadUsage]);
 
   useEffect(() => {
     async function loadExistingResult() {
@@ -224,15 +286,60 @@ function TranslatePageContent() {
                 />
 
                 {!taskId && (
-                  <motion.button
-                    onClick={startTranslate}
-                    disabled={isTranslating || !isLoaded || !isSignedIn}
-                    className="w-full mt-6 py-4 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-                    whileHover={{ scale: 1.01 }}
-                    whileTap={{ scale: 0.99 }}
-                  >
-                    {isTranslating ? 'Starting...' : 'Start Translation'}
-                  </motion.button>
+                  <>
+                    <div className={`mt-6 rounded-2xl border p-5 ${
+                      isStartBlocked
+                        ? 'border-amber-200 bg-amber-50/90'
+                        : 'border-primary-100 bg-primary-50/60'
+                    }`}>
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">
+                            Translation check
+                          </p>
+                          <p className="mt-2 text-sm text-gray-600">
+                            {isUsageLoading
+                              ? 'Checking your current plan and page allowance...'
+                              : isFreePlan
+                                ? `Free plan will translate the first ${freePreviewPages} page${freePreviewPages === 1 ? '' : 's'} as a preview${knownTotalPages ? ` from this ${knownTotalPages}-page file` : ''}.`
+                                : knownTotalPages
+                                  ? `This translation will use ${knownTotalPages} page${knownTotalPages === 1 ? '' : 's'} from your ${usage?.plan || 'current'} plan.`
+                                  : 'This file will be checked against your plan limits before translation starts.'}
+                          </p>
+                          {!isFreePlan && usage && usage.remainingPages !== null && (
+                            <p className="mt-2 text-xs text-gray-500">
+                              Remaining this month: {usage.remainingPages} / {usage.monthlyPageQuota} pages.
+                            </p>
+                          )}
+                          {exceedsPaidFileLimit && usage && (
+                            <p className="mt-2 text-sm font-medium text-amber-700">
+                              Your plan supports up to {usage.maxPagesPerFile} pages per PDF.
+                            </p>
+                          )}
+                          {exceedsPaidMonthlyQuota && usage && (
+                            <p className="mt-2 text-sm font-medium text-amber-700">
+                              You do not have enough remaining pages this month.
+                            </p>
+                          )}
+                        </div>
+                        {isStartBlocked && (
+                          <a href="/pricing" className="text-sm font-semibold text-primary-600 hover:text-primary-700">
+                            View plans
+                          </a>
+                        )}
+                      </div>
+                    </div>
+
+                    <motion.button
+                      onClick={startTranslate}
+                      disabled={isTranslating || !isLoaded || !isSignedIn || isStartBlocked}
+                      className="w-full mt-6 py-4 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
+                      whileHover={{ scale: 1.01 }}
+                      whileTap={{ scale: 0.99 }}
+                    >
+                      {isTranslating ? 'Starting...' : isFreePlan ? 'Start Free Preview' : 'Start Translation'}
+                    </motion.button>
+                  </>
                 )}
               </div>
 
@@ -253,13 +360,18 @@ function TranslatePageContent() {
               )}
 
               {error && (
-                <motion.p
-                  className="mt-4 text-center text-red-500"
+                <motion.div
+                  className="mt-4 text-center"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                 >
-                  {error}
-                </motion.p>
+                  <p className="text-red-500">{error}</p>
+                  {shouldShowPricingLink(error) && (
+                    <a href="/pricing" className="mt-2 inline-block text-sm font-semibold text-primary-600 hover:text-primary-700">
+                      View plans and limits
+                    </a>
+                  )}
+                </motion.div>
               )}
             </motion.div>
           ) : (

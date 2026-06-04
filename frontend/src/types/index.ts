@@ -15,6 +15,12 @@ export interface TranslationRequest {
 export interface TranslationResponse {
   success: boolean;
   taskId: string;
+  requestedPages?: number;
+  totalPages?: number;
+  isPartial?: boolean;
+  plan?: string;
+  monthlyPageQuota?: number;
+  remainingPages?: number | null;
 }
 
 export interface TranslationProgress {
@@ -77,6 +83,18 @@ export interface MyFileRecord {
 export interface MyFilesResponse {
   success: boolean;
   files: MyFileRecord[];
+}
+
+export interface UsageResponse {
+  success: boolean;
+  plan: string;
+  usageMonth: string;
+  usedPages: number;
+  monthlyPageQuota: number;
+  remainingPages: number | null;
+  maxPagesPerFile: number;
+  maxFileSizeMB: number;
+  freePreviewPages: number;
 }
 
 export interface LanguageOption {

@@ -82,11 +82,27 @@ class DatabaseService:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL UNIQUE,
+                    file_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    plan TEXT NOT NULL,
+                    pages INTEGER NOT NULL,
+                    usage_month TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(id) ON DELETE CASCADE,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_user_id ON translation_tasks(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_file_id ON translation_tasks(file_id);
                 CREATE INDEX IF NOT EXISTS idx_exports_task_id ON exports(task_id);
                 CREATE INDEX IF NOT EXISTS idx_exports_user_id ON exports(user_id);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_user_month ON usage_events(user_id, usage_month);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_task_id ON usage_events(task_id);
                 """
             )
             self._ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
@@ -247,6 +263,50 @@ class DatabaseService:
                 (task_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def get_current_usage_month(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def get_user_monthly_usage(self, user_id: str, usage_month: Optional[str] = None) -> int:
+        month = usage_month or self.get_current_usage_month()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(SUM(pages), 0) AS used_pages
+                FROM usage_events
+                WHERE user_id = ? AND usage_month = ?
+                """,
+                (user_id, month),
+            ).fetchone()
+
+        return int(row["used_pages"] or 0) if row else 0
+
+    def record_usage_event(
+        self,
+        *,
+        task_id: str,
+        file_id: str,
+        user_id: str,
+        plan: str,
+        pages: int,
+        usage_month: Optional[str] = None,
+    ) -> None:
+        if pages <= 0:
+            return
+
+        month = usage_month or self.get_current_usage_month()
+        now = _utc_now()
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO usage_events (
+                    task_id, file_id, user_id, plan, pages, usage_month, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, file_id, user_id, plan, pages, month, now),
+            )
 
     def list_user_files(self, user_id: str) -> list[Dict[str, Any]]:
         with self._connect() as connection:

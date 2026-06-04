@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
@@ -10,7 +10,7 @@ const plans = [
     price: '$0',
     description: 'Try LingoDoc before upgrading.',
     badge: 'Current default',
-    quota: '30 preview pages / month',
+    quota: 'Unlimited preview use',
     limits: ['Preview first 3 pages', 'PDF up to 25 MB'],
     features: [
       'Upload larger-page PDFs for preview',
@@ -97,7 +97,7 @@ export default function PricingPage() {
             Simple plans for PDF translation
           </h1>
           <p className="mt-4 text-lg text-gray-600 max-w-2xl mx-auto">
-            Each plan includes a monthly translated-page quota plus a per-PDF page and file-size limit.
+            Free previews are limited per file. Paid plans include a monthly translated-page quota plus per-PDF page and file-size limits.
           </p>
 
           <div className="mt-8 inline-flex rounded-2xl bg-white/80 p-1 shadow-lg ring-1 ring-gray-100">
@@ -210,3 +210,7 @@ export default function PricingPage() {
     </div>
   );
 }
+
+
+
+

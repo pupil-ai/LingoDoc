@@ -4,8 +4,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { useAuth, SignInButton } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { Header } from '@/components/Header';
-import { getMyFiles } from '@/lib/api';
-import type { MyFileRecord } from '@/types';
+import { UsageSummaryCard } from '@/components/UsageSummaryCard';
+import { getMyFiles, getMyUsage } from '@/lib/api';
+import type { MyFileRecord, UsageResponse } from '@/types';
 
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -50,6 +51,7 @@ function DashboardContent() {
   const router = useRouter();
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const [files, setFiles] = useState<MyFileRecord[]>([]);
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -64,13 +66,18 @@ function DashboardContent() {
 
     try {
       const token = await getToken({ skipCache: true });
-      const response = await getMyFiles(token);
-      if (response.success) {
-        setFiles(response.files);
+      const [filesResponse, usageResponse] = await Promise.all([
+        getMyFiles(token),
+        getMyUsage(token),
+      ]);
+      if (filesResponse.success) {
+        setFiles(filesResponse.files);
+        setUsage(usageResponse.success ? usageResponse : null);
       } else {
         setError('Failed to load your files.');
       }
     } catch {
+      setUsage(null);
       setError('Failed to load your files.');
     } finally {
       setIsLoading(false);
@@ -85,6 +92,7 @@ function DashboardContent() {
     const params = new URLSearchParams({
       fileId: file.id,
       filename: file.original_filename,
+      totalPages: String(file.total_pages),
       sourceLang: file.source_lang || 'en',
       targetLang: file.target_lang || 'zh',
     });
@@ -131,6 +139,10 @@ function DashboardContent() {
           >
             Upload New File
           </button>
+        </div>
+
+        <div className="mb-8">
+          <UsageSummaryCard usage={usage} isLoading={isLoading} />
         </div>
 
         <div className="bg-white/80 backdrop-blur-sm rounded-3xl shadow-xl border border-white/60 overflow-hidden">

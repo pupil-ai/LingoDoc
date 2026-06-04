@@ -1,14 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { Header } from '@/components/Header';
 import { FileUploader } from '@/components/FileUploader';
+import { UsageSummaryCard } from '@/components/UsageSummaryCard';
 import { LanguageSelector } from '@/components/LanguageSelector';
 import { FeatureCard } from '@/components/FeatureCard';
-import { uploadFile } from '@/lib/api';
+import { getMyUsage, uploadFile } from '@/lib/api';
+import type { UsageResponse } from '@/types';
 
 function ClerkSetupRequired() {
   return (
@@ -28,13 +30,50 @@ function ClerkSetupRequired() {
   );
 }
 
+function shouldShowPricingLink(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('plan') ||
+    normalized.includes('quota') ||
+    normalized.includes('remaining') ||
+    normalized.includes('upgrade')
+  );
+}
+
 function HomeContent() {
   const router = useRouter();
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const [sourceLang, setSourceLang] = useState('en');
   const [targetLang, setTargetLang] = useState('zh');
   const [isUploading, setIsUploading] = useState(false);
+  const [isUsageLoading, setIsUsageLoading] = useState(false);
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [error, setError] = useState('');
+
+  const loadUsage = useCallback(async () => {
+    if (!isLoaded || !isSignedIn) {
+      setUsage(null);
+      return;
+    }
+
+    setIsUsageLoading(true);
+
+    try {
+      const token = await getToken({ skipCache: true });
+      const response = await getMyUsage(token);
+      if (response.success) {
+        setUsage(response);
+      }
+    } catch {
+      setUsage(null);
+    } finally {
+      setIsUsageLoading(false);
+    }
+  }, [getToken, isLoaded, isSignedIn]);
+
+  useEffect(() => {
+    loadUsage();
+  }, [loadUsage]);
 
   const handleFileUpload = async (file: File) => {
     if (!isLoaded) {
@@ -57,6 +96,7 @@ function HomeContent() {
         const params = new URLSearchParams({
           fileId: response.fileId,
           filename: response.filename || file.name,
+          totalPages: String(response.totalPages),
           sourceLang,
           targetLang,
         });
@@ -118,6 +158,12 @@ function HomeContent() {
             />
           </div>
 
+          {isSignedIn && (
+            <div className="mb-6">
+              <UsageSummaryCard usage={usage} isLoading={isUsageLoading} />
+            </div>
+          )}
+
           <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded || !isSignedIn} />
 
           {!isSignedIn && (
@@ -134,13 +180,18 @@ function HomeContent() {
           )}
 
           {error && (
-            <motion.p
-              className="mt-4 text-center text-red-500"
+            <motion.div
+              className="mt-4 text-center"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
             >
-              {error}
-            </motion.p>
+              <p className="text-red-500">{error}</p>
+              {shouldShowPricingLink(error) && (
+                <a href="/pricing" className="mt-2 inline-block text-sm font-semibold text-primary-600 hover:text-primary-700">
+                  View plans and limits
+                </a>
+              )}
+            </motion.div>
           )}
         </motion.div>
 

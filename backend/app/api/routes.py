@@ -69,6 +69,65 @@ def _get_page_translation_limit(total_pages: int, user_id: str) -> tuple[int, Di
     return get_translatable_page_count(total_pages, limits), plan_metadata
 
 
+def _get_usage_summary(user_id: str) -> Dict[str, Any]:
+    plan_metadata, limits = _get_user_plan_metadata(user_id)
+    usage_month = db_service.get_current_usage_month()
+    used_pages = db_service.get_user_monthly_usage(user_id, usage_month)
+    monthly_quota = limits.monthly_page_quota
+    remaining_pages = max(monthly_quota - used_pages, 0) if monthly_quota > 0 else None
+
+    return {
+        **plan_metadata,
+        "usageMonth": usage_month,
+        "usedPages": used_pages,
+        "remainingPages": remaining_pages,
+        "monthlyPageQuota": monthly_quota,
+    }
+
+
+def _authorize_translation_request(total_pages: int, user_id: str) -> tuple[int, Dict[str, Any]]:
+    plan_metadata = _get_usage_summary(user_id)
+    limits = get_plan_limits(plan_metadata["plan"], "active" if plan_metadata["plan"] != "free" else "inactive")
+    monthly_quota = plan_metadata["monthlyPageQuota"]
+    remaining_pages = plan_metadata["remainingPages"]
+
+    if remaining_pages is not None and remaining_pages <= 0:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"You have used all {monthly_quota} pages in your {plan_metadata['plan']} "
+                f"plan for {plan_metadata['usageMonth']}. Please upgrade or wait until next month."
+            ),
+        )
+
+    if limits.plan == "free":
+        preview_pages = get_translatable_page_count(total_pages, limits)
+        pages_to_translate = min(preview_pages, remaining_pages) if remaining_pages is not None else preview_pages
+        if pages_to_translate <= 0:
+            raise HTTPException(status_code=402, detail="No free preview pages remaining this month.")
+        return pages_to_translate, plan_metadata
+
+    if not limits.is_unlimited_pages and total_pages > limits.max_pages_per_file:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Your {plan_metadata['plan']} plan supports PDFs up to "
+                f"{limits.max_pages_per_file} pages per file."
+            ),
+        )
+
+    if remaining_pages is not None and total_pages > remaining_pages:
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                f"This PDF needs {total_pages} pages, but your {plan_metadata['plan']} "
+                f"plan has {remaining_pages} pages remaining for {plan_metadata['usageMonth']}."
+            ),
+        )
+
+    return total_pages, plan_metadata
+
+
 def _build_page_translated_text(translated_blocks: list[Dict[str, Any]]) -> str:
     translated_parts = [
         block.get("translatedText", "").strip()
@@ -175,7 +234,25 @@ async def list_my_files(current_user: CurrentUser = Depends(get_current_user)):
         "files": files,
     })
 
-async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, target_lang: str, user_id: str):
+
+@router.get("/api/me/usage")
+async def get_my_usage(current_user: CurrentUser = Depends(get_current_user)):
+    _sync_current_user(current_user)
+    return JSONResponse({
+        "success": True,
+        **_get_usage_summary(current_user.id),
+    })
+
+
+async def translate_pdf_task(
+    task_id: str,
+    file_id: str,
+    source_lang: str,
+    target_lang: str,
+    user_id: str,
+    pages_to_translate: int,
+    plan_metadata: Dict[str, Any],
+):
     try:
         translation_tasks[task_id] = {
             "status": "processing",
@@ -186,7 +263,7 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
         }
         
         total_pages = pdf_service.get_total_pages(file_id)
-        pages_to_translate, plan_metadata = _get_page_translation_limit(total_pages, user_id)
+        pages_to_translate = min(pages_to_translate, total_pages)
         is_partial = pages_to_translate < total_pages
         translation_tasks[task_id]["totalPages"] = total_pages
         translation_tasks[task_id]["requestedPages"] = pages_to_translate
@@ -212,6 +289,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             "isPartial": is_partial,
             "plan": plan_metadata["plan"],
             "pageLimit": plan_metadata["maxPagesPerFile"],
+            "usageMonth": plan_metadata.get("usageMonth"),
+            "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
         }
         
         for page_num in range(pages_to_translate):
@@ -291,6 +370,14 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             await asyncio.sleep(0.5)
         
         pdf_service.save_translation_result(task_id, result)
+        db_service.record_usage_event(
+            task_id=task_id,
+            file_id=file_id,
+            user_id=user_id,
+            plan=plan_metadata["plan"],
+            pages=len(result["pages"]),
+            usage_month=plan_metadata.get("usageMonth"),
+        )
         translation_tasks[task_id]["status"] = "completed"
         db_service.update_translation_task(
             task_id,
@@ -317,9 +404,11 @@ async def start_translation(
     _ensure_file_owner(request.fileId, current_user.id)
 
     try:
-        pdf_service.get_total_pages(request.fileId)
+        total_pages = pdf_service.get_total_pages(request.fileId)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
+
+    pages_to_translate, plan_metadata = _authorize_translation_request(total_pages, current_user.id)
     
     task_id = str(uuid.uuid4())
     db_service.create_translation_task(
@@ -336,11 +425,19 @@ async def start_translation(
         request.sourceLang,
         request.targetLang,
         current_user.id,
+        pages_to_translate,
+        plan_metadata,
     )
     
     return JSONResponse({
         "success": True,
         "taskId": task_id,
+        "requestedPages": pages_to_translate,
+        "totalPages": total_pages,
+        "isPartial": pages_to_translate < total_pages,
+        "plan": plan_metadata["plan"],
+        "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
+        "remainingPages": plan_metadata.get("remainingPages"),
     })
 
 @router.get("/api/translate/{task_id}/progress")
