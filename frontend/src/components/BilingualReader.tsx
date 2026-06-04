@@ -29,7 +29,7 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
       setPreviewError('');
 
       try {
-        const token = await getToken();
+        const token = await getToken({ skipCache: true });
         const response = await fetch(`/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`, {
           cache: 'no-store',
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -85,7 +85,7 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
     setDownloadingType(downloadType);
     try {
       const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=${downloadType}&download=true&v=${Date.now()}`;
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const response = await fetch(downloadUrl, {
         cache: 'no-store',
         headers: token ? { Authorization: `Bearer ${token}` } : {},

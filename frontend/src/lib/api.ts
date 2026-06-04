@@ -13,6 +13,15 @@ function buildAuthHeaders(token?: string | null): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+async function parseJsonResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.detail || fallbackMessage);
+  }
+
+  return data;
+}
+
 export async function uploadFile(file: File, token?: string | null): Promise<UploadResponse> {
   const formData = new FormData();
   formData.append('file', file);
@@ -23,7 +32,7 @@ export async function uploadFile(file: File, token?: string | null): Promise<Upl
     body: formData,
   });
 
-  return response.json();
+  return parseJsonResponse<UploadResponse>(response, 'Failed to upload file');
 }
 
 export async function startTranslation(
@@ -39,7 +48,7 @@ export async function startTranslation(
     body: JSON.stringify(request),
   });
 
-  return response.json();
+  return parseJsonResponse<TranslationResponse>(response, 'Failed to start translation');
 }
 
 export async function getTranslationProgress(
@@ -49,7 +58,7 @@ export async function getTranslationProgress(
   const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/progress`, {
     headers: buildAuthHeaders(token),
   });
-  return response.json();
+  return parseJsonResponse<TranslationProgress>(response, 'Failed to get translation progress');
 }
 
 export async function getTranslationResult(
@@ -59,7 +68,7 @@ export async function getTranslationResult(
   const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/result`, {
     headers: buildAuthHeaders(token),
   });
-  return response.json();
+  return parseJsonResponse<TranslationResult>(response, 'Failed to get translation result');
 }
 
 export async function exportTranslation(
@@ -90,5 +99,5 @@ export async function getMyFiles(token?: string | null): Promise<MyFilesResponse
     cache: 'no-store',
   });
 
-  return response.json();
+  return parseJsonResponse<MyFilesResponse>(response, 'Failed to load files');
 }

@@ -1,10 +1,13 @@
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import jwt
 from fastapi import Header, HTTPException, status
 from jwt import PyJWKClient
+
+from app.services.translate_service import safe_print
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,21 @@ def _get_bearer_token(authorization: Optional[str]) -> str:
     return token
 
 
+def _describe_token_for_log(token: str) -> str:
+    try:
+        header = jwt.get_unverified_header(token)
+        claims = jwt.decode(token, options={"verify_signature": False})
+        now = int(datetime.now(timezone.utc).timestamp())
+        return (
+            f"alg={header.get('alg')} kid={header.get('kid')} "
+            f"iss={claims.get('iss')} aud={claims.get('aud')} "
+            f"sub_present={bool(claims.get('sub'))} "
+            f"exp={claims.get('exp')} nbf={claims.get('nbf')} iat={claims.get('iat')} now={now}"
+        )
+    except Exception as exc:
+        return f"failed_to_decode_unverified_token={type(exc).__name__}: {str(exc)}"
+
+
 async def get_current_user(authorization: Optional[str] = Header(default=None)) -> CurrentUser:
     token = _get_bearer_token(authorization)
     issuer = _get_clerk_issuer()
@@ -66,12 +84,19 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
             "algorithms": ["RS256"],
             "issuer": issuer,
             "options": {"verify_aud": bool(audience)},
+            "leeway": 60,
         }
         if audience:
             decode_kwargs["audience"] = audience
 
         claims = jwt.decode(token, **decode_kwargs)
-    except Exception:
+    except Exception as exc:
+        safe_print(
+            "[AUTH] Clerk token verification failed: "
+            f"{type(exc).__name__}: {str(exc)}; "
+            f"configured_issuer={issuer}; configured_audience={audience or '<none>'}; "
+            f"{_describe_token_for_log(token)}"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired auth token",

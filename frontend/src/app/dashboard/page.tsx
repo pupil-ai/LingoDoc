@@ -63,7 +63,7 @@ function DashboardContent() {
     setError('');
 
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const response = await getMyFiles(token);
       if (response.success) {
         setFiles(response.files);

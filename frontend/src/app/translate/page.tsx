@@ -66,7 +66,7 @@ function TranslatePageContent() {
     setError('');
     
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const response = await startTranslation({
         fileId,
         sourceLang,
@@ -79,7 +79,7 @@ function TranslatePageContent() {
         setError('Failed to start translation');
       }
     } catch (err) {
-      setError('An error occurred. Please try again.');
+      setError(err instanceof Error ? err.message : 'An error occurred. Please try again.');
     } finally {
       setIsTranslating(false);
     }
@@ -89,7 +89,7 @@ function TranslatePageContent() {
     if (!taskId) return;
 
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const progressData = await getTranslationProgress(taskId, token);
       setProgress(progressData);
 
@@ -103,7 +103,7 @@ function TranslatePageContent() {
       }
     } catch (err) {
       setIsPreparingPreview(false);
-      setError('Failed to get translation progress');
+      setError(err instanceof Error ? err.message : 'Failed to get translation progress');
     }
   }, [getToken, taskId]);
 
@@ -123,7 +123,7 @@ function TranslatePageContent() {
       setError('');
 
       try {
-        const token = await getToken();
+        const token = await getToken({ skipCache: true });
         const progressData = await getTranslationProgress(initialTaskId, token);
         setProgress(progressData);
 
@@ -135,8 +135,8 @@ function TranslatePageContent() {
         } else {
           setError(progressData.error || 'Translation task failed');
         }
-      } catch {
-        setError('Failed to load translation result');
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to load translation result');
       } finally {
         setIsPreparingPreview(false);
       }

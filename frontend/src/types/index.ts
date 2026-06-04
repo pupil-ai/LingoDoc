@@ -48,6 +48,8 @@ export interface MyFileRecord {
   original_filename: string;
   file_size: number;
   total_pages: number;
+  storage_provider: string;
+  storage_key: string;
   created_at: string;
   task_id: string | null;
   source_lang: string | null;

@@ -9,6 +9,7 @@ import os
 from app.services.pdf_service import PDFService
 from app.services.translate_service import TranslationServiceFactory, safe_print
 from app.services.db_service import db_service
+from app.services.storage_service import storage_service
 from app.api.auth import CurrentUser, get_current_user
 
 router = APIRouter()
@@ -90,6 +91,8 @@ async def upload_file(file: UploadFile = File(...), current_user: CurrentUser = 
             original_filename=filename,
             file_size=len(content),
             total_pages=total_pages,
+            storage_provider=storage_service.provider,
+            storage_key=pdf_service.get_file_storage_key(file_id),
             storage_path=pdf_service.get_file_path(file_id),
         )
         

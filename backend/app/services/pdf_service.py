@@ -4,6 +4,8 @@ import uuid
 import unicodedata
 from typing import List, Dict, Any
 
+from app.services.storage_service import storage_service
+
 
 class PDFService:
     def __init__(self):
@@ -11,19 +13,23 @@ class PDFService:
         self.output_dir = os.path.join(os.path.dirname(__file__), "..", "..", "outputs")
         os.makedirs(self.upload_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
+
+    def get_file_storage_key(self, file_id: str) -> str:
+        return f"uploads/{file_id}.pdf"
+
+    def get_output_storage_key(self, task_id: str) -> str:
+        return f"outputs/{task_id}.json"
     
     def save_uploaded_file(self, file_content: bytes) -> str:
         file_id = str(uuid.uuid4())
-        file_path = os.path.join(self.upload_dir, f"{file_id}.pdf")
-        with open(file_path, "wb") as f:
-            f.write(file_content)
+        storage_service.save_bytes(self.get_file_storage_key(file_id), file_content)
         return file_id
     
     def get_file_path(self, file_id: str) -> str:
-        return os.path.join(self.upload_dir, f"{file_id}.pdf")
+        return storage_service.get_local_path(self.get_file_storage_key(file_id))
     
     def get_output_path(self, task_id: str) -> str:
-        return os.path.join(self.output_dir, f"{task_id}.json")
+        return storage_service.get_local_path(self.get_output_storage_key(task_id))
     
     def get_total_pages(self, file_id: str) -> int:
         file_path = self.get_file_path(file_id)
@@ -143,19 +149,17 @@ class PDFService:
         return text
     
     def save_translation_result(self, task_id: str, result: Dict[str, Any]):
-        output_path = self.get_output_path(task_id)
         import json
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        content = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+        storage_service.save_bytes(self.get_output_storage_key(task_id), content)
     
     def load_translation_result(self, task_id: str) -> Dict[str, Any]:
-        output_path = self.get_output_path(task_id)
-        if not os.path.exists(output_path):
+        storage_key = self.get_output_storage_key(task_id)
+        if not storage_service.exists(storage_key):
             raise FileNotFoundError("Result not found")
         
         import json
-        with open(output_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        return json.loads(storage_service.read_bytes(storage_key).decode("utf-8"))
 
     def _find_existing_font(self, font_paths: List[str]) -> str:
         for font_path in font_paths:

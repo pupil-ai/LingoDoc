@@ -51,7 +51,7 @@ function HomeContent() {
     setError('');
 
     try {
-      const token = await getToken();
+      const token = await getToken({ skipCache: true });
       const response = await uploadFile(file, token);
       if (response.success) {
         const params = new URLSearchParams({

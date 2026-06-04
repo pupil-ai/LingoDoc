@@ -8,7 +8,10 @@ interface ProgressBarProps {
 }
 
 export function ProgressBar({ progress }: ProgressBarProps) {
-  const { status, progress: percentage, processedPages, totalPages } = progress;
+  const status = progress?.status || 'processing';
+  const percentage = Number.isFinite(progress?.progress) ? progress.progress : 0;
+  const processedPages = progress?.processedPages ?? 0;
+  const totalPages = progress?.totalPages ?? 0;
 
   return (
     <motion.div

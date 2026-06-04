@@ -39,8 +39,24 @@ class DatabaseService:
                     original_filename TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
                     total_pages INTEGER NOT NULL,
+                    storage_provider TEXT NOT NULL DEFAULT 'local',
+                    storage_key TEXT NOT NULL DEFAULT '',
                     storage_path TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS exports (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    output_type TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    storage_provider TEXT NOT NULL,
+                    storage_key TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(id) ON DELETE CASCADE,
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
@@ -64,8 +80,26 @@ class DatabaseService:
                 CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_user_id ON translation_tasks(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_file_id ON translation_tasks(file_id);
+                CREATE INDEX IF NOT EXISTS idx_exports_task_id ON exports(task_id);
+                CREATE INDEX IF NOT EXISTS idx_exports_user_id ON exports(user_id);
                 """
             )
+            self._ensure_column(connection, "files", "storage_provider", "TEXT NOT NULL DEFAULT 'local'")
+            self._ensure_column(connection, "files", "storage_key", "TEXT NOT NULL DEFAULT ''")
+
+    def _ensure_column(
+        self,
+        connection: sqlite3.Connection,
+        table_name: str,
+        column_name: str,
+        column_definition: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
     def upsert_user(self, user_id: str, email: Optional[str] = None) -> None:
         now = _utc_now()
@@ -88,6 +122,8 @@ class DatabaseService:
         original_filename: str,
         file_size: int,
         total_pages: int,
+        storage_provider: str,
+        storage_key: str,
         storage_path: str,
     ) -> None:
         now = _utc_now()
@@ -95,11 +131,22 @@ class DatabaseService:
             connection.execute(
                 """
                 INSERT INTO files (
-                    id, user_id, original_filename, file_size, total_pages, storage_path, created_at
+                    id, user_id, original_filename, file_size, total_pages,
+                    storage_provider, storage_key, storage_path, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (file_id, user_id, original_filename, file_size, total_pages, storage_path, now),
+                (
+                    file_id,
+                    user_id,
+                    original_filename,
+                    file_size,
+                    total_pages,
+                    storage_provider,
+                    storage_key,
+                    storage_path,
+                    now,
+                ),
             )
 
     def get_file(self, file_id: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +229,8 @@ class DatabaseService:
                     files.original_filename,
                     files.file_size,
                     files.total_pages,
+                    files.storage_provider,
+                    files.storage_key,
                     files.created_at,
                     latest_task.id AS task_id,
                     latest_task.source_lang,
