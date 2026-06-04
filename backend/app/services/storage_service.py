@@ -51,4 +51,99 @@ class LocalStorageService:
         return str(self._resolve_key(storage_key))
 
 
-storage_service: StorageService = LocalStorageService()
+class R2StorageService:
+    provider = "r2"
+
+    def __init__(self) -> None:
+        self.bucket = os.getenv("R2_BUCKET", "").strip()
+        self.endpoint_url = os.getenv("R2_ENDPOINT_URL", "").strip()
+        self.access_key_id = os.getenv("R2_ACCESS_KEY_ID", "").strip()
+        self.secret_access_key = os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+
+        missing = [
+            name
+            for name, value in {
+                "R2_BUCKET": self.bucket,
+                "R2_ENDPOINT_URL": self.endpoint_url,
+                "R2_ACCESS_KEY_ID": self.access_key_id,
+                "R2_SECRET_ACCESS_KEY": self.secret_access_key,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise RuntimeError(f"Missing R2 configuration: {', '.join(missing)}")
+
+        default_cache_dir = Path(__file__).resolve().parents[2] / "tmp" / "storage-cache"
+        self.cache_dir = Path(os.getenv("LOCAL_STORAGE_CACHE_DIR", str(default_cache_dir))).resolve()
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.client = self._create_client()
+
+    def _create_client(self):
+        import boto3
+
+        return boto3.client(
+            "s3",
+            endpoint_url=self.endpoint_url,
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
+            region_name="auto",
+        )
+
+    def _normalize_key(self, storage_key: str) -> str:
+        clean_key = storage_key.replace("\\", "/").lstrip("/")
+        if not clean_key or ".." in clean_key.split("/"):
+            raise ValueError("Invalid storage key")
+        return clean_key
+
+    def _cache_path(self, storage_key: str) -> Path:
+        clean_key = self._normalize_key(storage_key)
+        target_path = (self.cache_dir / clean_key).resolve()
+
+        if self.cache_dir not in target_path.parents and target_path != self.cache_dir:
+            raise ValueError("Invalid storage key")
+
+        return target_path
+
+    def _write_cache(self, storage_key: str, content: bytes) -> None:
+        target_path = self._cache_path(storage_key)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_bytes(content)
+
+    def save_bytes(self, storage_key: str, content: bytes) -> None:
+        clean_key = self._normalize_key(storage_key)
+        self.client.put_object(Bucket=self.bucket, Key=clean_key, Body=content)
+        self._write_cache(clean_key, content)
+
+    def read_bytes(self, storage_key: str) -> bytes:
+        clean_key = self._normalize_key(storage_key)
+        response = self.client.get_object(Bucket=self.bucket, Key=clean_key)
+        content = response["Body"].read()
+        self._write_cache(clean_key, content)
+        return content
+
+    def exists(self, storage_key: str) -> bool:
+        clean_key = self._normalize_key(storage_key)
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=clean_key)
+            return True
+        except Exception:
+            return False
+
+    def get_local_path(self, storage_key: str) -> str:
+        clean_key = self._normalize_key(storage_key)
+        target_path = self._cache_path(clean_key)
+        if not target_path.exists():
+            self.read_bytes(clean_key)
+        return str(target_path)
+
+
+def create_storage_service() -> StorageService:
+    provider = os.getenv("STORAGE_PROVIDER", "local").strip().lower()
+    if provider == "local":
+        return LocalStorageService()
+    if provider == "r2":
+        return R2StorageService()
+    raise RuntimeError(f"Unsupported STORAGE_PROVIDER: {provider}")
+
+
+storage_service: StorageService = create_storage_service()
