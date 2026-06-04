@@ -10,8 +10,12 @@ interface ProgressBarProps {
 export function ProgressBar({ progress }: ProgressBarProps) {
   const status = progress?.status || 'processing';
   const percentage = Number.isFinite(progress?.progress) ? progress.progress : 0;
-  const processedPages = progress?.processedPages ?? 0;
+  const processedPages = progress?.translatedPages ?? progress?.processedPages ?? 0;
+  const requestedPages = progress?.requestedPages ?? progress?.totalPages ?? 0;
   const totalPages = progress?.totalPages ?? 0;
+  const pageLabel = progress?.isPartial
+    ? `Free preview: ${processedPages} / ${requestedPages} pages · ${totalPages} total`
+    : `${processedPages} / ${totalPages} pages`;
 
   return (
     <motion.div
@@ -26,7 +30,7 @@ export function ProgressBar({ progress }: ProgressBarProps) {
             {status === 'processing' ? 'Translating...' : status === 'completed' ? 'Completed!' : 'Error'}
           </h3>
           <span className="text-sm font-medium text-gray-600">
-            {processedPages} / {totalPages} pages
+            {pageLabel}
           </span>
         </div>
 
@@ -59,6 +63,7 @@ export function ProgressBar({ progress }: ProgressBarProps) {
         <div className="flex items-center justify-between mt-3">
           <span className="text-sm text-gray-500">
             {status === 'processing' ? 'Estimating time...' :
+             status === 'completed' && progress?.isPartial ? 'Free preview finished. Upgrade later to translate the full document.' :
              status === 'completed' ? 'Translation finished!' : 'Something went wrong'}
           </span>
           <span className="text-sm font-bold text-primary-600">

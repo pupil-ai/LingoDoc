@@ -271,7 +271,14 @@ function TranslatePageContent() {
             >
               <div className="bg-white/70 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 mb-8">
                 <div className="flex items-center justify-between">
-                  <h2 className="text-xl font-semibold text-gray-800">Translation Complete!</h2>
+                  <div>
+                    <h2 className="text-xl font-semibold text-gray-800">Translation Complete!</h2>
+                    {result.isPartial && (
+                      <p className="mt-2 text-sm text-amber-600">
+                        You are on the Free plan, so only the first {result.translatedPages || result.pages.length} pages were translated as a preview. This file has {result.totalPages || result.pages.length} pages in total.
+                      </p>
+                    )}
+                  </div>
                   <button
                     onClick={() => router.push('/')}
                     className="px-6 py-2 gradient-primary text-white font-medium rounded-xl hover:opacity-90 transition-opacity"

@@ -29,6 +29,8 @@ class DatabaseService:
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     email TEXT,
+                    plan TEXT NOT NULL DEFAULT 'free',
+                    subscription_status TEXT NOT NULL DEFAULT 'inactive',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -70,6 +72,9 @@ class DatabaseService:
                     progress REAL NOT NULL DEFAULT 0,
                     processed_pages INTEGER NOT NULL DEFAULT 0,
                     total_pages INTEGER NOT NULL DEFAULT 0,
+                    requested_pages INTEGER NOT NULL DEFAULT 0,
+                    translated_pages INTEGER NOT NULL DEFAULT 0,
+                    is_partial INTEGER NOT NULL DEFAULT 0,
                     error TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -84,8 +89,13 @@ class DatabaseService:
                 CREATE INDEX IF NOT EXISTS idx_exports_user_id ON exports(user_id);
                 """
             )
+            self._ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
+            self._ensure_column(connection, "users", "subscription_status", "TEXT NOT NULL DEFAULT 'inactive'")
             self._ensure_column(connection, "files", "storage_provider", "TEXT NOT NULL DEFAULT 'local'")
             self._ensure_column(connection, "files", "storage_key", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(connection, "translation_tasks", "requested_pages", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "translation_tasks", "translated_pages", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "translation_tasks", "is_partial", "INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_column(
         self,
@@ -114,6 +124,11 @@ class DatabaseService:
                 """,
                 (user_id, email, now, now),
             )
+
+    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+        return dict(row) if row else None
 
     def create_file(
         self,
@@ -168,9 +183,10 @@ class DatabaseService:
                 """
                 INSERT INTO translation_tasks (
                     id, file_id, user_id, source_lang, target_lang, status,
-                    progress, processed_pages, total_pages, created_at, updated_at
+                    progress, processed_pages, total_pages, requested_pages,
+                    translated_pages, is_partial, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, 'processing', 0, 0, 0, ?, ?)
+                VALUES (?, ?, ?, ?, ?, 'processing', 0, 0, 0, 0, 0, 0, ?, ?)
                 """,
                 (task_id, file_id, user_id, source_lang, target_lang, now, now),
             )
@@ -184,6 +200,9 @@ class DatabaseService:
         processed_pages: Optional[int] = None,
         total_pages: Optional[int] = None,
         error: Optional[str] = None,
+        requested_pages: Optional[int] = None,
+        translated_pages: Optional[int] = None,
+        is_partial: Optional[bool] = None,
     ) -> None:
         updates = ["updated_at = ?"]
         values: list[Any] = [_utc_now()]
@@ -203,6 +222,15 @@ class DatabaseService:
         if error is not None:
             updates.append("error = ?")
             values.append(error)
+        if requested_pages is not None:
+            updates.append("requested_pages = ?")
+            values.append(requested_pages)
+        if translated_pages is not None:
+            updates.append("translated_pages = ?")
+            values.append(translated_pages)
+        if is_partial is not None:
+            updates.append("is_partial = ?")
+            values.append(1 if is_partial else 0)
 
         values.append(task_id)
 
@@ -238,6 +266,10 @@ class DatabaseService:
                     latest_task.status,
                     latest_task.progress,
                     latest_task.processed_pages,
+                    latest_task.total_pages AS task_total_pages,
+                    latest_task.requested_pages,
+                    latest_task.translated_pages,
+                    latest_task.is_partial,
                     latest_task.error,
                     latest_task.created_at AS task_created_at,
                     latest_task.updated_at AS task_updated_at

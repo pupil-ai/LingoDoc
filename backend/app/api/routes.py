@@ -10,6 +10,12 @@ from app.services.pdf_service import PDFService
 from app.services.translate_service import TranslationServiceFactory, safe_print
 from app.services.db_service import db_service
 from app.services.storage_service import storage_service
+from app.services.plan_service import (
+    PlanLimits,
+    get_max_file_size_bytes,
+    get_plan_limits,
+    get_translatable_page_count,
+)
 from app.api.auth import CurrentUser, get_current_user
 
 router = APIRouter()
@@ -38,6 +44,38 @@ def _get_user_email(current_user: CurrentUser) -> str:
 
 def _sync_current_user(current_user: CurrentUser) -> None:
     db_service.upsert_user(current_user.id, _get_user_email(current_user) or None)
+
+
+def _get_user_plan_metadata(user_id: str) -> tuple[Dict[str, Any], PlanLimits]:
+    user_record = db_service.get_user(user_id) or {}
+    limits = get_plan_limits(
+        user_record.get("plan"),
+        user_record.get("subscription_status"),
+    )
+    return (
+        {
+            "plan": limits.plan,
+            "maxPagesPerFile": limits.max_pages_per_file,
+            "maxFileSizeMB": limits.max_file_size_mb,
+            "monthlyPageQuota": limits.monthly_page_quota,
+            "freePreviewPages": limits.free_preview_pages,
+        },
+        limits,
+    )
+
+
+def _get_page_translation_limit(total_pages: int, user_id: str) -> tuple[int, Dict[str, Any]]:
+    plan_metadata, limits = _get_user_plan_metadata(user_id)
+    return get_translatable_page_count(total_pages, limits), plan_metadata
+
+
+def _build_page_translated_text(translated_blocks: list[Dict[str, Any]]) -> str:
+    translated_parts = [
+        block.get("translatedText", "").strip()
+        for block in translated_blocks
+        if block.get("type") == "text" and block.get("translatedText", "").strip()
+    ]
+    return "\n".join(translated_parts)
 
 
 def _ensure_file_owner(file_id: str, user_id: str) -> Dict[str, Any]:
@@ -72,16 +110,26 @@ def _ensure_task_owner(task_id: str, user_id: str) -> Dict[str, Any]:
 
 @router.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), current_user: CurrentUser = Depends(get_current_user)):
-    _sync_current_user(current_user)
-
     filename = file.filename or ""
     if file.content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed")
     
     try:
+        _sync_current_user(current_user)
         content = await file.read()
         if not content.startswith(b"%PDF"):
             raise HTTPException(status_code=400, detail="Only PDF files are allowed")
+
+        plan_metadata, limits = _get_user_plan_metadata(current_user.id)
+        max_file_size = get_max_file_size_bytes(limits)
+        if max_file_size > 0 and len(content) > max_file_size:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"Your {plan_metadata['plan']} plan supports PDF files up to "
+                    f"{plan_metadata['maxFileSizeMB']} MB."
+                ),
+            )
 
         file_id = pdf_service.save_uploaded_file(content)
         total_pages = pdf_service.get_total_pages(file_id)
@@ -106,6 +154,15 @@ async def upload_file(file: UploadFile = File(...), current_user: CurrentUser = 
     except HTTPException:
         raise
     except Exception as e:
+        safe_print(f"[DEBUG] Upload failed for user={current_user.id}, filename={filename}: {str(e)}")
+        if storage_service.provider == "r2":
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Failed to upload to Cloudflare R2. For local testing, set "
+                    "STORAGE_PROVIDER=local in backend/.env and restart the backend."
+                ),
+            )
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -129,14 +186,35 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
         }
         
         total_pages = pdf_service.get_total_pages(file_id)
+        pages_to_translate, plan_metadata = _get_page_translation_limit(total_pages, user_id)
+        is_partial = pages_to_translate < total_pages
         translation_tasks[task_id]["totalPages"] = total_pages
-        db_service.update_translation_task(task_id, total_pages=total_pages)
+        translation_tasks[task_id]["requestedPages"] = pages_to_translate
+        translation_tasks[task_id]["translatedPages"] = 0
+        translation_tasks[task_id]["isPartial"] = is_partial
+        translation_tasks[task_id]["plan"] = plan_metadata["plan"]
+        db_service.update_translation_task(
+            task_id,
+            total_pages=total_pages,
+            requested_pages=pages_to_translate,
+            translated_pages=0,
+            is_partial=is_partial,
+        )
         
         translator = TranslationServiceFactory.get("ofoxai")
         safe_print(f"[DEBUG] Translator type: {type(translator).__name__}")
-        result = {"pages": [], "fileId": file_id, "userId": user_id}
+        result = {
+            "pages": [],
+            "fileId": file_id,
+            "userId": user_id,
+            "totalPages": total_pages,
+            "translatedPages": pages_to_translate,
+            "isPartial": is_partial,
+            "plan": plan_metadata["plan"],
+            "pageLimit": plan_metadata["maxPagesPerFile"],
+        }
         
-        for page_num in range(total_pages):
+        for page_num in range(pages_to_translate):
             text_blocks = pdf_service.extract_text_blocks(file_id, page_num)
             full_text = pdf_service.extract_full_text(file_id, page_num)
             
@@ -190,11 +268,7 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
                         })
             
             # 整页翻译用于预览
-            try:
-                translated_full = await translator.translate(full_text, source_lang, target_lang)
-            except Exception as e:
-                safe_print(f"[DEBUG] Full text translation failed: {str(e)}")
-                translated_full = full_text
+            translated_full = _build_page_translated_text(translated_blocks)
             
             result["pages"].append({
                 "pageNum": page_num + 1,
@@ -204,11 +278,13 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             })
             
             translation_tasks[task_id]["processedPages"] = page_num + 1
-            translation_tasks[task_id]["progress"] = ((page_num + 1) / total_pages) * 100
+            translation_tasks[task_id]["translatedPages"] = page_num + 1
+            translation_tasks[task_id]["progress"] = ((page_num + 1) / max(pages_to_translate, 1)) * 100
             db_service.update_translation_task(
                 task_id,
                 progress=translation_tasks[task_id]["progress"],
                 processed_pages=page_num + 1,
+                translated_pages=page_num + 1,
                 total_pages=total_pages,
             )
             
@@ -220,7 +296,8 @@ async def translate_pdf_task(task_id: str, file_id: str, source_lang: str, targe
             task_id,
             status="completed",
             progress=100,
-            processed_pages=total_pages,
+            processed_pages=pages_to_translate,
+            translated_pages=pages_to_translate,
             total_pages=total_pages,
         )
         
@@ -272,21 +349,31 @@ async def get_progress(task_id: str, current_user: CurrentUser = Depends(get_cur
 
     if task_id not in translation_tasks:
         if "status" in task_record:
+            requested_pages = task_record.get("requested_pages") or task_record.get("total_pages") or 0
+            translated_pages = task_record.get("translated_pages") or task_record.get("processed_pages") or 0
             return JSONResponse({
                 "status": task_record["status"],
                 "progress": task_record["progress"],
                 "processedPages": task_record["processed_pages"],
                 "totalPages": task_record["total_pages"],
+                "requestedPages": requested_pages,
+                "translatedPages": translated_pages,
+                "isPartial": bool(task_record.get("is_partial")),
                 **({"error": task_record["error"]} if task_record.get("error") else {}),
             })
 
         try:
             result = pdf_service.load_translation_result(task_id)
+            total_pages = result.get("totalPages", len(result["pages"]))
+            translated_pages = result.get("translatedPages", len(result["pages"]))
             return JSONResponse({
                 "status": "completed",
                 "progress": 100,
-                "processedPages": len(result["pages"]),
-                "totalPages": len(result["pages"]),
+                "processedPages": translated_pages,
+                "totalPages": total_pages,
+                "requestedPages": translated_pages,
+                "translatedPages": translated_pages,
+                "isPartial": bool(result.get("isPartial")),
             })
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Task not found")

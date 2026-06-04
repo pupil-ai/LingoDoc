@@ -22,6 +22,9 @@ export interface TranslationProgress {
   progress: number;
   processedPages: number;
   totalPages: number;
+  requestedPages?: number;
+  translatedPages?: number;
+  isPartial?: boolean;
   error?: string;
 }
 
@@ -41,6 +44,11 @@ export interface PageResult {
 export interface TranslationResult {
   success: boolean;
   pages: PageResult[];
+  totalPages?: number;
+  translatedPages?: number;
+  isPartial?: boolean;
+  plan?: string;
+  pageLimit?: number;
 }
 
 export interface MyFileRecord {
@@ -57,6 +65,10 @@ export interface MyFileRecord {
   status: 'processing' | 'completed' | 'error' | null;
   progress: number | null;
   processed_pages: number | null;
+  task_total_pages: number | null;
+  requested_pages: number | null;
+  translated_pages: number | null;
+  is_partial: number | null;
   error: string | null;
   task_created_at: string | null;
   task_updated_at: string | null;

@@ -44,6 +44,7 @@ export function Header() {
           <nav className="hidden md:flex items-center gap-6">
             <a href="/" className="text-gray-600 hover:text-primary-600 transition-colors">Home</a>
             <a href="#" className="text-gray-600 hover:text-primary-600 transition-colors">Features</a>
+            <a href="/pricing" className="text-gray-600 hover:text-primary-600 transition-colors">Pricing</a>
             <a href="/dashboard" className="text-gray-600 hover:text-primary-600 transition-colors">My Files</a>
           </nav>
           {isClerkConfigured ? (

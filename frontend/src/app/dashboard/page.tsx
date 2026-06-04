@@ -178,6 +178,11 @@ function DashboardContent() {
                           <p className="font-medium text-gray-900 truncate">{file.original_filename}</p>
                           <p className="mt-1 text-xs text-gray-500">{formatFileSize(file.file_size)}</p>
                         </div>
+                        {Boolean(file.is_partial) && (
+                          <p className="mt-1 text-xs text-amber-600">
+                            Preview: {file.translated_pages || file.processed_pages || file.requested_pages || 0} / {file.total_pages} pages
+                          </p>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-600">{file.total_pages}</td>
                       <td className="px-6 py-4 text-sm text-gray-600">

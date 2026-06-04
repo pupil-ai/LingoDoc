@@ -65,7 +65,7 @@ function HomeContent() {
         setError('Failed to upload file');
       }
     } catch (err) {
-      setError('An error occurred during upload. Please try again.');
+      setError(err instanceof Error ? err.message : 'An error occurred during upload. Please try again.');
     } finally {
       setIsUploading(false);
     }

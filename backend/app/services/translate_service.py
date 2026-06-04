@@ -114,7 +114,7 @@ class OfoxAIService(TranslationService):
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         api_key = os.getenv("OFOXAI_API_KEY")
         base_url = os.getenv("OFOXAI_BASE_URL", "https://api.ofox.ai/v1")
-        model = os.getenv("OFOXAI_MODEL", "openai/gpt-5.4-nano")
+        model = os.getenv("OFOXAI_MODEL", "openai/gpt-5.4")
         
         if not api_key or api_key == "your_ofoxai_api_key_here":
             raise ValueError("OfoxAI API key not configured. Please set OFOXAI_API_KEY in .env file")
