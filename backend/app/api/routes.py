@@ -1,10 +1,14 @@
-from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import uuid
 import asyncio
 import os
+import hashlib
+import hmac
+import json
+import time
 
 from app.services.pdf_service import PDFService
 from app.services.translate_service import TranslationServiceFactory, safe_print
@@ -27,6 +31,87 @@ class TranslationRequest(BaseModel):
     fileId: str
     sourceLang: str
     targetLang: str
+
+
+def _parse_paddle_signature(signature_header: str) -> Dict[str, str]:
+    signature_parts: Dict[str, str] = {}
+    for part in signature_header.split(";"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        signature_parts[key.strip()] = value.strip()
+    return signature_parts
+
+
+def _verify_paddle_webhook_signature(raw_body: bytes, signature_header: str) -> None:
+    webhook_secret = os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+    if not webhook_secret:
+        raise HTTPException(status_code=503, detail="Paddle webhook secret is not configured")
+
+    signature_parts = _parse_paddle_signature(signature_header)
+    timestamp = signature_parts.get("ts")
+    signature = signature_parts.get("h1")
+    if not timestamp or not signature:
+        raise HTTPException(status_code=400, detail="Missing Paddle webhook signature")
+
+    tolerance_seconds = int(os.getenv("PADDLE_WEBHOOK_TOLERANCE_SECONDS", "300"))
+    try:
+        timestamp_int = int(timestamp)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Paddle webhook timestamp")
+
+    if tolerance_seconds > 0 and abs(int(time.time()) - timestamp_int) > tolerance_seconds:
+        raise HTTPException(status_code=400, detail="Expired Paddle webhook signature")
+
+    signed_payload = f"{timestamp}:{raw_body.decode('utf-8')}".encode("utf-8")
+    expected_signature = hmac.new(
+        webhook_secret.encode("utf-8"),
+        signed_payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, signature):
+        raise HTTPException(status_code=400, detail="Invalid Paddle webhook signature")
+
+
+def _get_nested(data: Dict[str, Any], *keys: str) -> Optional[Any]:
+    current: Any = data
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _get_paddle_price_id(data: Dict[str, Any]) -> Optional[str]:
+    items = data.get("items")
+    if isinstance(items, list) and items:
+        first_item = items[0]
+        price_id = _get_nested(first_item, "price", "id") or first_item.get("price_id")
+        if isinstance(price_id, str) and price_id:
+            return price_id
+
+    price_id = data.get("price_id") or _get_nested(data, "price", "id")
+    return price_id if isinstance(price_id, str) and price_id else None
+
+
+def _get_paddle_plan(data: Dict[str, Any]) -> str:
+    custom_data = data.get("custom_data")
+    if isinstance(custom_data, dict):
+        custom_plan = str(custom_data.get("plan") or "").strip().lower()
+        if custom_plan in {"starter", "pro", "power"}:
+            return custom_plan
+
+    return "free"
+
+
+def _get_paddle_user_id(data: Dict[str, Any]) -> Optional[str]:
+    custom_data = data.get("custom_data")
+    if not isinstance(custom_data, dict):
+        return None
+
+    user_id = custom_data.get("userId") or custom_data.get("user_id")
+    return user_id if isinstance(user_id, str) and user_id else None
 
 def _raise_not_found() -> None:
     raise HTTPException(status_code=404, detail="Not found")
@@ -165,6 +250,61 @@ def _ensure_task_owner(task_id: str, user_id: str) -> Dict[str, Any]:
     if result.get("userId") != user_id:
         _raise_not_found()
     return result
+
+
+@router.post("/api/billing/paddle/webhook")
+async def paddle_webhook(request: Request):
+    raw_body = await request.body()
+    signature_header = request.headers.get("Paddle-Signature", "")
+    _verify_paddle_webhook_signature(raw_body, signature_header)
+
+    try:
+        event = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid Paddle webhook payload")
+
+    event_id = str(event.get("event_id") or event.get("id") or "")
+    event_type = str(event.get("event_type") or "")
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    if not event_id or not event_type:
+        raise HTTPException(status_code=400, detail="Invalid Paddle webhook event")
+
+    if db_service.has_processed_paddle_event(event_id):
+        safe_print(f"[PADDLE] Duplicate webhook ignored: event_id={event_id}, type={event_type}")
+        return JSONResponse({"success": True, "duplicate": True})
+
+    if event_type.startswith("subscription."):
+        user_id = _get_paddle_user_id(data)
+        if user_id:
+            price_id = _get_paddle_price_id(data)
+            plan = _get_paddle_plan(data)
+            subscription_status = str(data.get("status") or "inactive").strip().lower()
+            if subscription_status in {"canceled", "cancelled", "paused", "deleted"}:
+                plan = "free"
+                subscription_status = "inactive"
+
+            db_service.update_user_subscription(
+                user_id=user_id,
+                plan=plan,
+                subscription_status=subscription_status,
+                paddle_customer_id=data.get("customer_id"),
+                paddle_subscription_id=data.get("id"),
+                paddle_price_id=price_id,
+            )
+            safe_print(
+                "[PADDLE] Subscription synced: "
+                f"event_id={event_id}, type={event_type}, user_id={user_id}, "
+                f"plan={plan}, status={subscription_status}, price_id={price_id or 'unknown'}"
+            )
+        else:
+            safe_print(
+                f"[PADDLE] Subscription webhook has no Clerk user id: event_id={event_id}, type={event_type}"
+            )
+
+    db_service.record_paddle_event(event_id, event_type)
+    if not event_type.startswith("subscription."):
+        safe_print(f"[PADDLE] Webhook received: event_id={event_id}, type={event_type}")
+    return JSONResponse({"success": True})
 
 
 @router.post("/api/upload")

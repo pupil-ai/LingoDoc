@@ -36,6 +36,22 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
   const percentage = quota > 0 ? Math.min((usedPages / quota) * 100, 100) : 0;
   const isOutOfQuota = remainingPages !== null && remainingPages <= 0;
   const isFreePreviewMode = usage.plan === 'free' && quota <= 0;
+  const planName = formatPlan(usage.plan);
+  const statusBadgeClass = isFreePreviewMode
+    ? 'bg-slate-100 text-slate-700'
+    : isOutOfQuota
+      ? 'bg-amber-100 text-amber-700'
+      : 'bg-emerald-100 text-emerald-700';
+  const statusLabel = isFreePreviewMode
+    ? 'Preview only'
+    : isOutOfQuota
+      ? 'Quota reached'
+      : 'Active';
+  const summaryLabel = isFreePreviewMode
+    ? 'Current plan'
+    : quota > 0
+      ? 'Monthly allowance'
+      : 'Usage';
 
   return (
     <div className={`rounded-2xl border p-5 shadow-sm ${
@@ -43,22 +59,35 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
         ? 'border-amber-200 bg-amber-50/90'
         : 'border-white/70 bg-white/80'
     }`}>
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-sm font-semibold text-gray-900">
-              {formatPlan(usage.plan)} plan usage
-            </p>
-            <span className="rounded-full bg-primary-50 px-2.5 py-1 text-xs font-medium text-primary-700">
+            <span className="rounded-full bg-primary-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-primary-700">
+              {summaryLabel}
+            </span>
+            <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${statusBadgeClass}`}>
+              {statusLabel}
+            </span>
+            <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
               {usage.usageMonth}
             </span>
           </div>
+
+          <div className="mt-3 flex flex-wrap items-end gap-x-3 gap-y-1">
+            <p className="text-2xl font-bold text-gray-900">{planName}</p>
+            {!isFreePreviewMode && quota > 0 && (
+              <p className="text-sm font-medium text-gray-500">
+                {formatNumber(usedPages)} used of {formatNumber(quota)} pages
+              </p>
+            )}
+          </div>
+
           <p className="mt-2 text-sm text-gray-600">
             {isFreePreviewMode
-              ? `${formatNumber(usedPages)} preview pages used this month`
+              ? `Free users can preview the first ${usage.freePreviewPages} page${usage.freePreviewPages === 1 ? '' : 's'} of each PDF before upgrading.`
               : quota > 0
-                ? `${formatNumber(usedPages)} / ${formatNumber(quota)} pages used this month`
-                : `${formatNumber(usedPages)} pages used this month`}
+                ? `${formatNumber(remainingPages || 0)} pages remaining this month. Usage resets monthly.`
+                : `${formatNumber(usedPages)} pages used this month.`}
           </p>
         </div>
 

@@ -31,6 +31,10 @@ class DatabaseService:
                     email TEXT,
                     plan TEXT NOT NULL DEFAULT 'free',
                     subscription_status TEXT NOT NULL DEFAULT 'inactive',
+                    paddle_customer_id TEXT,
+                    paddle_subscription_id TEXT,
+                    paddle_price_id TEXT,
+                    paddle_subscription_updated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -96,6 +100,12 @@ class DatabaseService:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS paddle_webhook_events (
+                    id TEXT PRIMARY KEY,
+                    event_type TEXT NOT NULL,
+                    processed_at TEXT NOT NULL
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_user_id ON translation_tasks(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_file_id ON translation_tasks(file_id);
@@ -107,6 +117,10 @@ class DatabaseService:
             )
             self._ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
             self._ensure_column(connection, "users", "subscription_status", "TEXT NOT NULL DEFAULT 'inactive'")
+            self._ensure_column(connection, "users", "paddle_customer_id", "TEXT")
+            self._ensure_column(connection, "users", "paddle_subscription_id", "TEXT")
+            self._ensure_column(connection, "users", "paddle_price_id", "TEXT")
+            self._ensure_column(connection, "users", "paddle_subscription_updated_at", "TEXT")
             self._ensure_column(connection, "files", "storage_provider", "TEXT NOT NULL DEFAULT 'local'")
             self._ensure_column(connection, "files", "storage_key", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(connection, "translation_tasks", "requested_pages", "INTEGER NOT NULL DEFAULT 0")
@@ -145,6 +159,66 @@ class DatabaseService:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+    def has_processed_paddle_event(self, event_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM paddle_webhook_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        return bool(row)
+
+    def record_paddle_event(self, event_id: str, event_type: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO paddle_webhook_events (id, event_type, processed_at)
+                VALUES (?, ?, ?)
+                """,
+                (event_id, event_type, _utc_now()),
+            )
+
+    def update_user_subscription(
+        self,
+        *,
+        user_id: str,
+        plan: str,
+        subscription_status: str,
+        paddle_customer_id: Optional[str] = None,
+        paddle_subscription_id: Optional[str] = None,
+        paddle_price_id: Optional[str] = None,
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO users (
+                    id, plan, subscription_status, paddle_customer_id,
+                    paddle_subscription_id, paddle_price_id,
+                    paddle_subscription_updated_at, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    plan = excluded.plan,
+                    subscription_status = excluded.subscription_status,
+                    paddle_customer_id = COALESCE(excluded.paddle_customer_id, users.paddle_customer_id),
+                    paddle_subscription_id = COALESCE(excluded.paddle_subscription_id, users.paddle_subscription_id),
+                    paddle_price_id = COALESCE(excluded.paddle_price_id, users.paddle_price_id),
+                    paddle_subscription_updated_at = excluded.paddle_subscription_updated_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    user_id,
+                    plan,
+                    subscription_status,
+                    paddle_customer_id,
+                    paddle_subscription_id,
+                    paddle_price_id,
+                    now,
+                    now,
+                    now,
+                ),
+            )
 
     def create_file(
         self,
