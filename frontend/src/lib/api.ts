@@ -1,14 +1,19 @@
 import type {
-  UploadResponse,
+  DeleteFileResponse,
+  MyFilesResponse,
+  TranslationProgress,
   TranslationRequest,
   TranslationResponse,
-  TranslationProgress,
   TranslationResult,
-  MyFilesResponse,
+  UploadResponse,
   UsageResponse,
 } from '@/types';
 
-const API_BASE_URL = 'http://localhost:8000';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || '';
+
+function buildUrl(path: string): string {
+  return `${API_BASE_URL}${path}`;
+}
 
 function buildAuthHeaders(token?: string | null): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
@@ -27,7 +32,7 @@ export async function uploadFile(file: File, token?: string | null): Promise<Upl
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch(`${API_BASE_URL}/api/upload`, {
+  const response = await fetch(buildUrl('/api/upload'), {
     method: 'POST',
     headers: buildAuthHeaders(token),
     body: formData,
@@ -40,7 +45,7 @@ export async function startTranslation(
   request: TranslationRequest,
   token?: string | null
 ): Promise<TranslationResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/translate`, {
+  const response = await fetch(buildUrl('/api/translate'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -56,7 +61,7 @@ export async function getTranslationProgress(
   taskId: string,
   token?: string | null
 ): Promise<TranslationProgress> {
-  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/progress`, {
+  const response = await fetch(buildUrl(`/api/translate/${taskId}/progress`), {
     headers: buildAuthHeaders(token),
   });
   return parseJsonResponse<TranslationProgress>(response, 'Failed to get translation progress');
@@ -66,7 +71,7 @@ export async function getTranslationResult(
   taskId: string,
   token?: string | null
 ): Promise<TranslationResult> {
-  const response = await fetch(`${API_BASE_URL}/api/translate/${taskId}/result`, {
+  const response = await fetch(buildUrl(`/api/translate/${taskId}/result`), {
     headers: buildAuthHeaders(token),
   });
   return parseJsonResponse<TranslationResult>(response, 'Failed to get translation result');
@@ -85,7 +90,7 @@ export async function exportTranslation(
         : 'format=text';
 
   const response = await fetch(
-    `${API_BASE_URL}/api/export/${taskId}?${params}&v=${Date.now()}`,
+    buildUrl(`/api/export/${taskId}?${params}&v=${Date.now()}`),
     {
       cache: 'no-store',
       headers: buildAuthHeaders(token),
@@ -94,8 +99,26 @@ export async function exportTranslation(
   return response.blob();
 }
 
+export async function getOriginalFilePreviewBlob(
+  fileId: string,
+  token?: string | null,
+  page = 1,
+  width = 1400
+): Promise<Blob> {
+  const response = await fetch(buildUrl(`/api/files/${fileId}/preview?page=${page}&width=${width}`), {
+    headers: buildAuthHeaders(token),
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to load original preview image');
+  }
+
+  return response.blob();
+}
+
 export async function getMyFiles(token?: string | null): Promise<MyFilesResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/my/files`, {
+  const response = await fetch(buildUrl('/api/my/files'), {
     headers: buildAuthHeaders(token),
     cache: 'no-store',
   });
@@ -103,8 +126,17 @@ export async function getMyFiles(token?: string | null): Promise<MyFilesResponse
   return parseJsonResponse<MyFilesResponse>(response, 'Failed to load files');
 }
 
+export async function deleteMyFile(fileId: string, token?: string | null): Promise<DeleteFileResponse> {
+  const response = await fetch(buildUrl(`/api/my/files/${fileId}`), {
+    method: 'DELETE',
+    headers: buildAuthHeaders(token),
+  });
+
+  return parseJsonResponse<DeleteFileResponse>(response, 'Failed to delete file');
+}
+
 export async function getMyUsage(token?: string | null): Promise<UsageResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/me/usage`, {
+  const response = await fetch(buildUrl('/api/me/usage'), {
     headers: buildAuthHeaders(token),
     cache: 'no-store',
   });

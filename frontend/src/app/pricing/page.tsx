@@ -1,8 +1,8 @@
-﻿'use client';
+'use client';
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { SignInButton, useAuth, useUser } from '@clerk/nextjs';
-import { motion } from 'framer-motion';
+import { Check, Mail, Sparkles, X } from 'lucide-react';
 import { Header } from '@/components/Header';
 
 declare global {
@@ -12,6 +12,24 @@ declare global {
         set: (environment: string) => void;
       };
       Initialize: (options: { token: string }) => void;
+      PricePreview?: (request: {
+        items: { priceId: string; quantity: number }[];
+      }) => Promise<{
+        data?: {
+          details?: {
+            lineItems?: Array<{
+              formattedTotals?: { subtotal?: string };
+              price?: {
+                id?: string;
+                unitPrice?: {
+                  amount?: string;
+                  currencyCode?: string;
+                };
+              };
+            }>;
+          };
+        };
+      }>;
       Checkout: {
         open: (options: {
           items: { priceId: string; quantity: number }[];
@@ -57,101 +75,360 @@ const plans = [
   {
     key: 'free',
     name: 'Free',
-    monthlyPrice: '$0',
-    yearlyPrice: '$0',
+    subtitle: 'Guest mode',
+    monthlyPrice: 0,
+    yearlyPrice: 0,
     monthlyPriceId: '',
     yearlyPriceId: '',
-    description: 'Try LingoDoc before upgrading.',
-    badge: 'Current default',
-    quota: 'Unlimited preview use',
-    limits: ['Preview first 3 pages', 'PDF up to 25 MB'],
-    features: [
-      'Upload larger-page PDFs for preview',
-      'Bilingual PDF preview and export',
-      'Original layout preservation',
-      'PDF uploads only',
-    ],
-    button: 'Start free preview',
-    href: '/',
+    button: 'Get Started Free',
+    items: ['20 pages / month', 'Preview first 3 pages', 'PDF up to 25 MB'],
     highlighted: false,
+    badge: '',
   },
   {
     key: 'starter',
     name: 'Starter',
-    monthlyPrice: '$12',
-    yearlyPrice: '$99',
+    subtitle: 'For casual users',
+    monthlyPrice: 15,
+    yearlyPrice: 144,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_YEARLY_PRICE_ID || '',
-    description: 'For short PDFs and occasional full translations.',
-    badge: 'Entry paid',
-    quota: '100 pages / month',
-    limits: ['Up to 50 pages per PDF', 'PDF up to 50 MB'],
-    features: [
-      'Full-document translation for small files',
-      'Full bilingual PDF export',
-      'Translated-only PDF export',
-      'File history and private workspace',
-    ],
     button: 'Choose Starter',
-    href: '#',
+    items: ['100 pages / month', 'Up to 50 pages per PDF', 'PDF up to 50 MB', 'File history'],
     highlighted: false,
+    badge: '',
   },
   {
     key: 'pro',
     name: 'Pro',
-    monthlyPrice: '$49',
-    yearlyPrice: '$399',
+    subtitle: 'Recommended',
+    monthlyPrice: 50,
+    yearlyPrice: 480,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_YEARLY_PRICE_ID || '',
-    description: 'For regular documents, reports, and papers.',
-    badge: 'Recommended',
-    quota: '500 pages / month',
-    limits: ['Up to 300 pages per PDF', 'PDF up to 100 MB'],
-    features: [
-      'Translate regular long-form PDFs',
-      'Full bilingual PDF export',
-      'Translated-only PDF export',
-      'File history and private workspace',
-    ],
     button: 'Choose Pro',
-    href: '#',
+    items: ['500 pages / month', 'Up to 300 pages per PDF', 'PDF up to 100 MB', 'File history'],
     highlighted: true,
+    badge: 'Most popular',
   },
   {
     key: 'power',
     name: 'Power',
-    monthlyPrice: '$249',
-    yearlyPrice: '$1,999',
+    subtitle: 'Large scale',
+    monthlyPrice: 250,
+    yearlyPrice: 2400,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_POWER_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_POWER_YEARLY_PRICE_ID || '',
-    description: 'For books, manuals, and very large files.',
-    badge: 'Large files',
-    quota: '3,000 pages / month',
-    limits: ['Up to 3000 pages per PDF', 'PDF up to 250 MB'],
-    features: [
+    button: 'Choose Power',
+    items: [
+      '3,000 pages / month',
+      'Up to 3000 pages per PDF',
+      'PDF up to 250 MB',
+      'File history',
       'Designed for long-form documents',
-      'Translate books, manuals, and archives',
       'Priority large-file processing later',
       'Best fit for heavy translation needs',
     ],
-    button: 'Choose Power',
-    href: '#',
     highlighted: false,
+    badge: '',
   },
 ];
 
-export default function PricingPage() {
+function formatCurrency(value: number): string {
+  return `$${value.toLocaleString('en-US')}`;
+}
+
+function formatMonthlyEquivalent(yearlyPrice: number): string {
+  if (yearlyPrice === 0) {
+    return '$0';
+  }
+
+  return formatCurrency(Math.round(yearlyPrice / 12));
+}
+
+function formatCurrencyByCode(value: number, currencyCode = 'USD'): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: currencyCode,
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
+  }).format(value);
+}
+
+type PricingPreviewMap = Partial<Record<(typeof plans)[number]['key'], {
+  monthlyLabel: string;
+  yearlyMonthlyLabel: string;
+  yearlyBilledLabel: string;
+}>>;
+
+const faqs = [
+  {
+    title: 'Can I change my plan later?',
+    body: 'Yes, you can upgrade or downgrade at any time. Changes take effect immediately and we will prorate the difference.',
+  },
+  {
+    title: 'What payment methods do you accept?',
+    body: 'We accept all major credit cards (Visa, MasterCard, American Express) and PayPal.',
+  },
+  {
+    title: 'Is there a free trial?',
+    body: 'Yes. The Free plan requires no credit card. To prevent abuse, translations are limited to the first 3 pages per document.',
+  },
+  {
+    title: 'What download formats are available?',
+    body: 'You can download bilingual PDFs (side-by-side view) or translation-only PDFs. Both preserve the original layout and formatting.',
+  },
+];
+
+function ClerkSetupRequired() {
+  return (
+    <div className="app-shell">
+      <Header />
+      <section className="page-container py-24">
+        <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
+          <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
+          <p className="mt-4 text-[16px] leading-relaxed text-slate-600">
+            Add your Clerk publishable key to <span className="font-semibold">frontend/.env.local</span> before testing plan flows.
+          </p>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ContactModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  if (!open) {
+    return null;
+  }
+
+  return (
+    <div className="overlay-scrim fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-md rounded-2xl bg-white p-8 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100"
+            aria-label="Close contact modal"
+          >
+            <X className="size-4" strokeWidth={2} />
+          </button>
+        </div>
+
+        <div className="mx-auto mt-[-4px] flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 text-white shadow-lg">
+          <Mail className="size-8" strokeWidth={2} />
+        </div>
+
+        <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Contact Us</h3>
+        <p className="mt-2 text-center text-[16px] text-slate-500">Get in touch with our team for custom solutions</p>
+
+        <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+          <div className="flex items-center gap-4">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400">
+              <Mail className="size-5" strokeWidth={2} />
+            </div>
+            <div>
+              <p className="text-[12px] font-medium text-slate-400">Email</p>
+              <p className="mt-1 text-[16px] font-medium text-slate-700">support@lingodoc.com</p>
+            </div>
+          </div>
+        </div>
+
+        <p className="mt-6 text-center text-[13px] text-slate-400">We typically respond within 24 hours</p>
+      </div>
+    </div>
+  );
+}
+
+function PlanCard({
+  plan,
+  isYearly,
+  isLoaded,
+  isSignedIn,
+  checkoutPlan,
+  previewPrice,
+  onSelect,
+}: {
+  plan: (typeof plans)[number];
+  isYearly: boolean;
+  isLoaded: boolean;
+  isSignedIn: boolean;
+  checkoutPlan: string;
+  previewPrice?: PricingPreviewMap[(typeof plans)[number]['key']];
+  onSelect: (plan: (typeof plans)[number]) => void;
+}) {
+  const displayPrice = isYearly
+    ? (previewPrice?.yearlyMonthlyLabel ?? formatMonthlyEquivalent(plan.yearlyPrice))
+    : (previewPrice?.monthlyLabel ?? formatCurrency(plan.monthlyPrice));
+  const billedYearlyLabel = previewPrice?.yearlyBilledLabel ?? `Billed ${formatCurrency(plan.yearlyPrice)}/year`;
+
+  return (
+    <div
+      className={`relative rounded-2xl border bg-white p-6 transition-all hover:-translate-y-0.5 hover:shadow-md ${
+        plan.highlighted ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-slate-200'
+      }`}
+    >
+      {plan.badge && (
+        <span className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white">
+          {plan.badge}
+        </span>
+      )}
+
+      <h2 className="text-[17px] font-bold text-slate-900">{plan.name}</h2>
+      <p className="mt-1 text-[13px] text-slate-500">{plan.subtitle}</p>
+
+      <div className="mt-5 flex items-end gap-1">
+        <span className="text-[56px] font-bold leading-none tracking-[-0.05em] text-slate-900">
+          {displayPrice}
+        </span>
+        {plan.key !== 'free' && <span className="pb-1 text-[14px] text-slate-500">/month</span>}
+      </div>
+
+      {plan.key !== 'free' && isYearly && (
+        <p className="mt-2 text-[13px] font-semibold text-emerald-600">
+          {billedYearlyLabel}
+        </p>
+      )}
+
+      {plan.key !== 'free' && isLoaded && !isSignedIn ? (
+        <SignInButton mode="modal">
+          <button className={`mt-6 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all ${
+            plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
+          }`}>
+            Sign in to choose
+          </button>
+        </SignInButton>
+      ) : (
+        <button
+          type="button"
+          onClick={() => onSelect(plan)}
+          disabled={checkoutPlan === plan.key}
+          className={`mt-6 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all disabled:cursor-wait disabled:opacity-70 ${
+            plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
+          }`}
+        >
+          {checkoutPlan === plan.key ? 'Opening checkout...' : plan.button}
+        </button>
+      )}
+
+      <ul className="mt-6 space-y-3">
+        {plan.items.map((item) => (
+          <li key={item} className="flex items-start gap-3 text-[14px] leading-6 text-slate-600">
+            <Check className="mt-0.5 size-4 shrink-0 text-emerald-600" strokeWidth={2} />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function PricingPageContent() {
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
   const [checkoutStatus, setCheckoutStatus] = useState('');
   const [checkoutPlan, setCheckoutPlan] = useState('');
+  const [isContactOpen, setIsContactOpen] = useState(false);
+  const [previewPrices, setPreviewPrices] = useState<PricingPreviewMap>({});
   const paddleInitializedRef = useRef(false);
   const { isLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
   const isYearly = billingCycle === 'yearly';
 
+  const initializePaddle = async () => {
+    await loadPaddleScript();
+
+    if (!window.Paddle) {
+      throw new Error('Paddle.js did not initialize.');
+    }
+
+    if (!paddleInitializedRef.current) {
+      window.Paddle.Environment?.set(PADDLE_ENVIRONMENT);
+      window.Paddle.Initialize({ token: PADDLE_CLIENT_TOKEN });
+      paddleInitializedRef.current = true;
+    }
+
+    return window.Paddle;
+  };
+
+  useEffect(() => {
+    async function loadPreviewPrices() {
+      if (!PADDLE_CLIENT_TOKEN) {
+        return;
+      }
+
+      const paidPlans = plans.filter((plan) => plan.key !== 'free');
+
+      try {
+        const paddle = await initializePaddle();
+        if (!paddle.PricePreview) {
+          return;
+        }
+
+        const monthlyPreview = await paddle.PricePreview({
+          items: paidPlans.map((plan) => ({
+            priceId: plan.monthlyPriceId,
+            quantity: 1,
+          })),
+        });
+
+        const yearlyPreview = await paddle.PricePreview({
+          items: paidPlans.map((plan) => ({
+            priceId: plan.yearlyPriceId,
+            quantity: 1,
+          })),
+        });
+
+        const monthlyLineItems = monthlyPreview.data?.details?.lineItems ?? [];
+        const yearlyLineItems = yearlyPreview.data?.details?.lineItems ?? [];
+
+        const monthlyByPriceId = new Map(
+          monthlyLineItems.map((item) => [item.price?.id, item])
+        );
+        const yearlyByPriceId = new Map(
+          yearlyLineItems.map((item) => [item.price?.id, item])
+        );
+
+        const nextPreviewPrices: PricingPreviewMap = {};
+
+        for (const plan of paidPlans) {
+          const monthlyItem = monthlyByPriceId.get(plan.monthlyPriceId);
+          const yearlyItem = yearlyByPriceId.get(plan.yearlyPriceId);
+
+          const monthlyAmountMinor = Number(monthlyItem?.price?.unitPrice?.amount ?? 0);
+          const monthlyCurrencyCode = monthlyItem?.price?.unitPrice?.currencyCode ?? 'USD';
+          const monthlyAmountMajor = monthlyAmountMinor / 100;
+          const yearlyAmountMinor = Number(yearlyItem?.price?.unitPrice?.amount ?? 0);
+          const yearlyCurrencyCode = yearlyItem?.price?.unitPrice?.currencyCode ?? 'USD';
+          const yearlyAmountMajor = yearlyAmountMinor / 100;
+
+          nextPreviewPrices[plan.key] = {
+            monthlyLabel: monthlyAmountMajor > 0
+              ? formatCurrencyByCode(Math.round(monthlyAmountMajor), monthlyCurrencyCode)
+              : formatCurrency(plan.monthlyPrice),
+            yearlyMonthlyLabel: yearlyAmountMajor > 0
+              ? formatCurrencyByCode(Math.round(yearlyAmountMajor / 12), yearlyCurrencyCode)
+              : formatMonthlyEquivalent(plan.yearlyPrice),
+            yearlyBilledLabel: yearlyAmountMajor > 0
+              ? `Billed ${formatCurrencyByCode(Math.round(yearlyAmountMajor), yearlyCurrencyCode)}/year`
+              : `Billed ${formatCurrency(plan.yearlyPrice)}/year`,
+          };
+        }
+
+        setPreviewPrices(nextPreviewPrices);
+      } catch (error) {
+        console.error('Failed to load Paddle preview prices:', error);
+      }
+    }
+
+    loadPreviewPrices();
+  }, []);
+
   const handleCheckout = async (plan: (typeof plans)[number]) => {
     if (plan.key === 'free') {
-      window.location.href = plan.href;
+      window.location.href = '/';
       return;
     }
 
@@ -174,22 +451,10 @@ export default function PricingPage() {
     try {
       setCheckoutPlan(plan.key);
       setCheckoutStatus('Opening Paddle checkout...');
-      await loadPaddleScript();
-
-      if (!window.Paddle) {
-        throw new Error('Paddle.js did not initialize.');
-      }
-
-      if (!paddleInitializedRef.current) {
-        if (PADDLE_ENVIRONMENT) {
-          window.Paddle.Environment?.set(PADDLE_ENVIRONMENT);
-        }
-        window.Paddle.Initialize({ token: PADDLE_CLIENT_TOKEN });
-        paddleInitializedRef.current = true;
-      }
+      const paddle = await initializePaddle();
 
       const email = user.primaryEmailAddress?.emailAddress;
-      window.Paddle.Checkout.open({
+      paddle.Checkout.open({
         items: [{ priceId, quantity: 1 }],
         ...(email ? { customer: { email } } : {}),
         customData: {
@@ -207,34 +472,27 @@ export default function PricingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+    <div className="app-shell">
       <Header />
 
-      <main className="max-w-6xl mx-auto px-4 py-16">
-        <motion.section
-          className="text-center mb-12"
-          initial={{ opacity: 0, y: 24 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.45 }}
-        >
-          <span className="inline-flex items-center rounded-full bg-primary-100 px-4 py-2 text-sm font-medium text-primary-700">
-            Pricing based on GPT-5.4 translation costs
+      <main className="page-container pb-16 pt-10 sm:pb-24 sm:pt-14">
+        <section className="text-center">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[12px] font-semibold text-emerald-600">
+            <Sparkles className="size-3" strokeWidth={2} />
+            Simple, transparent pricing
           </span>
-          <h1 className="font-display mt-6 text-4xl md:text-5xl font-bold text-gray-900">
-            Simple plans for PDF translation
-          </h1>
-          <p className="mt-4 text-lg text-gray-600 max-w-2xl mx-auto">
-            Free previews are limited per file. Paid plans include monthly translated-page quotas plus per-PDF page and file-size limits.
+
+          <h1 className="mt-5 text-[48px] font-bold tracking-[-0.06em] text-slate-900">Choose your plan</h1>
+          <p className="mx-auto mt-4 max-w-[620px] text-[17px] leading-relaxed text-slate-600">
+            Start free, upgrade when you need more. All plans include bilingual PDF output and layout preservation.
           </p>
 
-          <div className="mt-8 inline-flex rounded-2xl bg-white/80 p-1 shadow-lg ring-1 ring-gray-100">
+          <div className="mt-8 inline-flex rounded-xl bg-slate-100 p-1">
             <button
               type="button"
               onClick={() => setBillingCycle('monthly')}
-              className={`rounded-xl px-5 py-2 text-sm font-semibold transition-colors ${
-                billingCycle === 'monthly'
-                  ? 'gradient-primary text-white'
-                  : 'text-gray-600 hover:text-primary-600'
+              className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold ${
+                billingCycle === 'monthly' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'
               }`}
             >
               Monthly
@@ -242,119 +500,72 @@ export default function PricingPage() {
             <button
               type="button"
               onClick={() => setBillingCycle('yearly')}
-              className={`rounded-xl px-5 py-2 text-sm font-semibold transition-colors ${
-                billingCycle === 'yearly'
-                  ? 'gradient-primary text-white'
-                  : 'text-gray-600 hover:text-primary-600'
+              className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold ${
+                billingCycle === 'yearly' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'
               }`}
             >
-              Yearly · Save 30%
+              Yearly <span className="text-emerald-600">-20%</span>
             </button>
           </div>
 
           {checkoutStatus && (
-            <p className="mt-5 rounded-2xl bg-white/80 px-4 py-3 text-sm font-medium text-gray-700 shadow-sm ring-1 ring-gray-100">
+            <p className="mx-auto mt-6 max-w-[720px] rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-600">
               {checkoutStatus}
             </p>
           )}
-        </motion.section>
+        </section>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
-          {plans.map((plan, index) => (
-            <motion.div
-              key={plan.name}
-              className={`relative rounded-3xl border p-7 shadow-xl ${
-                plan.highlighted
-                  ? 'border-primary-200 bg-white ring-2 ring-primary-100'
-                  : 'border-white/60 bg-white/75 backdrop-blur-sm'
-              }`}
-              initial={{ opacity: 0, y: 24 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.45, delay: index * 0.08 }}
-            >
-              <div className="flex items-center justify-between gap-3">
-                <h2 className="font-display text-2xl font-bold text-gray-900">{plan.name}</h2>
-                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
-                  plan.highlighted ? 'bg-primary-100 text-primary-700' : 'bg-gray-100 text-gray-600'
-                }`}>
-                  {plan.badge}
-                </span>
-              </div>
-
-              <p className="mt-3 text-sm text-gray-500">{plan.description}</p>
-              <div className="mt-6">
-                <span className="text-3xl font-bold text-gray-900">
-                  {isYearly ? plan.yearlyPrice : plan.monthlyPrice}
-                </span>
-                {plan.monthlyPrice !== '$0' && (
-                  <span className="ml-2 text-sm text-gray-500">
-                    {isYearly ? '/ year' : '/ month'}
-                  </span>
-                )}
-                {isYearly && plan.monthlyPrice !== '$0' && (
-                  <p className="mt-2 text-sm font-semibold text-green-600">
-                    Annual billing saves 30% compared with monthly.
-                  </p>
-                )}
-              </div>
-
-              <div className="mt-6 rounded-2xl bg-slate-50 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Monthly quota</p>
-                <p className="mt-3 text-sm font-semibold text-gray-900">{plan.quota}</p>
-              </div>
-
-              <div className="mt-3 rounded-2xl bg-slate-50 p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Single PDF limit</p>
-                <div className="mt-3 space-y-2">
-                  {plan.limits.map((limit) => (
-                    <p key={limit} className="text-sm font-semibold text-gray-900">{limit}</p>
-                  ))}
-                </div>
-              </div>
-
-              <ul className="mt-7 space-y-3">
-                {plan.features.map((feature) => (
-                  <li key={feature} className="flex gap-3 text-sm text-gray-700">
-                    <svg className="mt-0.5 h-5 w-5 flex-none text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                    </svg>
-                    <span>{feature}</span>
-                  </li>
-                ))}
-              </ul>
-
-              {plan.key !== 'free' && isLoaded && !isSignedIn ? (
-                <SignInButton mode="modal">
-                  <button className="mt-8 block w-full rounded-xl px-5 py-3 text-center text-sm font-semibold gradient-primary text-white transition-opacity hover:opacity-90">
-                    Sign in to choose {plan.name}
-                  </button>
-                </SignInButton>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleCheckout(plan)}
-                  disabled={checkoutPlan === plan.key}
-                  className={`mt-8 block w-full rounded-xl px-5 py-3 text-center text-sm font-semibold transition-colors ${
-                    checkoutPlan === plan.key
-                      ? 'cursor-wait bg-gray-100 text-gray-500'
-                      : 'gradient-primary text-white hover:opacity-90'
-                  }`}
-                >
-                  {checkoutPlan === plan.key ? 'Opening checkout...' : plan.button}
-                </button>
-              )}
-            </motion.div>
+        <section className="mt-12 grid gap-4 xl:grid-cols-4">
+          {plans.map((plan) => (
+            <PlanCard
+              key={plan.key}
+              plan={plan}
+              isYearly={isYearly}
+              isLoaded={isLoaded}
+              isSignedIn={Boolean(isSignedIn)}
+              checkoutPlan={checkoutPlan}
+              previewPrice={previewPrices[plan.key]}
+              onSelect={handleCheckout}
+            />
           ))}
-        </div>
+        </section>
 
-        <div className="mt-10 rounded-2xl border border-amber-100 bg-amber-50/80 p-5 text-sm text-amber-800">
-          Paddle checkout is connected as a first pass. Add Paddle client token, price IDs, and webhook secret before testing real subscription updates.
-        </div>
+        <section className="mx-auto mt-20 max-w-[840px]">
+          <h2 className="text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Frequently asked questions</h2>
+          <div className="mt-10 space-y-8">
+            {faqs.map((item) => (
+              <div key={item.title} className="border-b border-slate-100 pb-8">
+                <h3 className="text-[20px] font-semibold tracking-[-0.02em] text-slate-900">{item.title}</h3>
+                <p className="mt-3 text-[16px] leading-7 text-slate-600">{item.body}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="mx-auto mt-20 max-w-[980px] rounded-2xl border border-slate-200 bg-slate-50 px-8 py-12 text-center">
+          <h2 className="text-[28px] font-bold tracking-[-0.04em] text-slate-900">Need a custom solution?</h2>
+          <p className="mx-auto mt-3 max-w-[540px] text-[16px] leading-relaxed text-slate-600">
+            We offer custom plans for users with specific requirements.
+          </p>
+          <button
+            type="button"
+            onClick={() => setIsContactOpen(true)}
+            className="mt-7 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
+          >
+            Contact our sales team
+          </button>
+        </section>
       </main>
+
+      <ContactModal open={isContactOpen} onClose={() => setIsContactOpen(false)} />
     </div>
   );
 }
 
+export default function PricingPage() {
+  if (!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) {
+    return <ClerkSetupRequired />;
+  }
 
-
-
+  return <PricingPageContent />;
+}

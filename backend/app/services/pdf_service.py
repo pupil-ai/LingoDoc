@@ -40,6 +40,25 @@ class PDFService:
         total_pages = len(doc)
         doc.close()
         return total_pages
+
+    def generate_page_preview_png(self, file_id: str, page_num: int = 0, max_width: int = 1400) -> bytes:
+        file_path = self.get_file_path(file_id)
+        if not os.path.exists(file_path):
+            raise FileNotFoundError("File not found")
+
+        doc = fitz.open(file_path)
+        try:
+            if page_num < 0 or page_num >= len(doc):
+                raise ValueError("Invalid page number")
+
+            page = doc[page_num]
+            page_width = max(float(page.rect.width), 1.0)
+            target_width = max(int(max_width), 400)
+            zoom = min(target_width / page_width, 2.0)
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+            return pixmap.tobytes("png")
+        finally:
+            doc.close()
     
     def extract_text_blocks(self, file_id: str, page_num: int) -> List[Dict[str, Any]]:
         file_path = self.get_file_path(file_id)

@@ -1,27 +1,32 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import type { ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
-import { useSearchParams, useRouter } from 'next/navigation';
-import { Header } from '@/components/Header';
-import { ProgressBar } from '@/components/ProgressBar';
-import { BilingualReader } from '@/components/BilingualReader';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { ArrowLeftRight, CheckCircle2, Download, FileText, Loader2, X } from 'lucide-react';
 import { LanguageSelector } from '@/components/LanguageSelector';
-import { startTranslation, getTranslationProgress, getTranslationResult, getMyUsage } from '@/lib/api';
+import { ProgressBar } from '@/components/ProgressBar';
+import {
+  exportTranslation,
+  getMyUsage,
+  getOriginalFilePreviewBlob,
+  getTranslationProgress,
+  getTranslationResult,
+  startTranslation,
+} from '@/lib/api';
 import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
+
+type DownloadType = 'bilingual' | 'translated';
 
 function ClerkSetupRequired() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
-      <Header />
-      <section className="max-w-xl mx-auto px-4 py-24">
-        <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
-          <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
-            Clerk setup required
-          </h1>
-          <p className="text-gray-600">
-            Add your Clerk publishable key to <span className="font-mono">frontend/.env.local</span> before translating files.
+    <div className="app-shell">
+      <section className="page-container py-24">
+        <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
+          <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
+          <p className="mt-4 text-[16px] leading-relaxed text-slate-600">
+            Add your Clerk publishable key to <span className="font-semibold">frontend/.env.local</span> before translating files.
           </p>
         </div>
       </section>
@@ -29,13 +34,160 @@ function ClerkSetupRequired() {
   );
 }
 
-function shouldShowPricingLink(message: string): boolean {
-  const normalized = message.toLowerCase();
+function formatPlanName(plan: string | undefined): string {
+  if (!plan) {
+    return 'Current';
+  }
+
+  return `${plan.charAt(0).toUpperCase()}${plan.slice(1)} Plan`;
+}
+
+function labelForLang(code: string): string {
+  const labels: Record<string, string> = {
+    en: 'English',
+    zh: 'Chinese',
+    ja: 'Japanese',
+    ko: 'Korean',
+    fr: 'French',
+    de: 'German',
+    es: 'Spanish',
+    ru: 'Russian',
+  };
+  return labels[code] || code.toUpperCase();
+}
+
+function PreviewPlaceholder({
+  title,
+  description,
+  originalPreviewUrl,
+  processing = false,
+  footer,
+  error,
+  overlay = false,
+}: {
+  title: string;
+  description: string;
+  originalPreviewUrl: string | null;
+  processing?: boolean;
+  footer?: ReactNode;
+  error?: string;
+  overlay?: boolean;
+}) {
+  const content = (
+    <div className="relative flex h-full min-h-0 w-full overflow-hidden bg-white">
+      {originalPreviewUrl ? (
+        <div className="absolute inset-0 flex items-center justify-center px-12 py-6">
+          <img
+            src={originalPreviewUrl}
+            alt="Original PDF first page preview"
+            className="h-full max-h-full w-auto max-w-full object-contain opacity-70"
+          />
+        </div>
+      ) : (
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-100 via-white to-slate-100" />
+      )}
+
+      <div className="absolute inset-0 bg-white/55 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-gradient-to-b from-white/70 via-white/80 to-white/90" />
+
+      <div className="relative z-10 flex h-full w-full items-center justify-center px-6 py-10">
+        <div className="w-full max-w-[540px] px-10 py-12 text-center">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-emerald-100 text-emerald-600 shadow-sm">
+            {processing ? <Loader2 className="size-8 animate-spin" strokeWidth={2} /> : <ArrowLeftRight className="size-8" strokeWidth={2} />}
+          </div>
+          <h1 className="mt-8 text-[32px] font-bold tracking-[-0.04em] text-slate-900">{title}</h1>
+          <p className="mt-4 text-[16px] leading-relaxed text-slate-500">{description}</p>
+          {footer ? <div className="mt-8">{footer}</div> : null}
+          {error ? <p className="mt-6 text-[14px] font-medium text-red-600">{error}</p> : null}
+        </div>
+      </div>
+    </div>
+  );
+
+  if (overlay) {
+    return content;
+  }
+
   return (
-    normalized.includes('plan') ||
-    normalized.includes('quota') ||
-    normalized.includes('remaining') ||
-    normalized.includes('upgrade')
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50">
+      <div className="w-full min-h-0 flex-1">
+        <div className="h-full w-full overflow-hidden">
+          {content}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DownloadModal({
+  open,
+  downloadingType,
+  filename,
+  onClose,
+  onDownload,
+}: {
+  open: boolean;
+  downloadingType: DownloadType | null;
+  filename: string;
+  onClose: () => void;
+  onDownload: (type: DownloadType) => void;
+}) {
+  if (!open) {
+    return null;
+  }
+
+  const cards: Array<{ type: DownloadType; title: string; description: string }> = [
+    {
+      type: 'bilingual',
+      title: 'Bilingual PDF',
+      description: 'Side-by-side original and translation. Perfect for comparison and learning.',
+    },
+    {
+      type: 'translated',
+      title: 'Translation only',
+      description: 'Just the translated text with original layout preserved.',
+    },
+  ];
+
+  return (
+    <div className="overlay-scrim fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="w-full max-w-md rounded-2xl bg-white shadow-2xl" onClick={(event) => event.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+          <h3 className="text-[17px] font-semibold text-slate-900">Download translated PDF</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100"
+            aria-label="Close download modal"
+          >
+            <X className="size-4" strokeWidth={2} />
+          </button>
+        </div>
+
+        <div className="space-y-4 p-5">
+          {cards.map((card) => (
+            <button
+              key={card.type}
+              type="button"
+              onClick={() => onDownload(card.type)}
+              disabled={Boolean(downloadingType)}
+              className="flex w-full items-start gap-4 rounded-2xl border border-slate-200 bg-white p-4 text-left transition-all hover:border-slate-300 hover:bg-slate-50 disabled:opacity-70"
+            >
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
+                <FileText className="size-6" strokeWidth={2} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[17px] font-semibold text-slate-900">{card.title}</p>
+                <p className="mt-1 text-[14px] leading-6 text-slate-500">{card.description}</p>
+              </div>
+              <Download className="mt-1 size-4 shrink-0 text-slate-300" strokeWidth={2} />
+            </button>
+          ))}
+        </div>
+
+        <div className="border-t border-slate-100 px-5 py-4 text-[12px] text-slate-400">File name: {filename}</div>
+      </div>
+    </div>
   );
 }
 
@@ -43,7 +195,7 @@ function TranslatePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { getToken, isLoaded, isSignedIn } = useAuth();
-  
+
   const fileId = searchParams.get('fileId');
   const filename = searchParams.get('filename');
   const initialTotalPages = Number(searchParams.get('totalPages') || '0');
@@ -61,33 +213,57 @@ function TranslatePageContent() {
     totalPages: 0,
   });
   const [result, setResult] = useState<TranslationResult | null>(null);
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [isUsageLoading, setIsUsageLoading] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
+  const [isPreparingPreview, setIsPreparingPreview] = useState(false);
+  const [originalPreviewObjectUrl, setOriginalPreviewObjectUrl] = useState<string | null>(null);
+  const [previewObjectUrl, setPreviewObjectUrl] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState('');
+  const [previewVersion] = useState(() => Date.now().toString());
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [error, setError] = useState('');
-  const displayFileName = filename || fileId;
+  const [isDownloadOpen, setIsDownloadOpen] = useState(false);
+  const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
+
+  const displayFileName = filename || fileId || 'document.pdf';
   const knownTotalPages = progress.totalPages || result?.totalPages || initialTotalPages || 0;
   const isFreePlan = usage?.plan === 'free';
-  const freePreviewPages = Math.min(
-    usage?.freePreviewPages || 3,
-    knownTotalPages || usage?.freePreviewPages || 3
-  );
   const exceedsPaidFileLimit = Boolean(
     usage &&
-    !isFreePlan &&
-    knownTotalPages > 0 &&
-    usage.maxPagesPerFile > 0 &&
-    knownTotalPages > usage.maxPagesPerFile
+      !isFreePlan &&
+      knownTotalPages > 0 &&
+      usage.maxPagesPerFile > 0 &&
+      knownTotalPages > usage.maxPagesPerFile
   );
   const exceedsPaidMonthlyQuota = Boolean(
     usage &&
-    !isFreePlan &&
-    knownTotalPages > 0 &&
-    usage.remainingPages !== null &&
-    knownTotalPages > usage.remainingPages
+      !isFreePlan &&
+      knownTotalPages > 0 &&
+      usage.remainingPages !== null &&
+      knownTotalPages > usage.remainingPages
   );
   const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota;
+  const isProcessing = Boolean(taskId) && !result;
+  const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
+  const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
+  const previewUrl = useMemo(
+    () => (previewObjectUrl ? `${previewObjectUrl}#page=1&zoom=page-fit` : null),
+    [previewObjectUrl]
+  );
+  const isPreviewReady = Boolean(result && previewUrl && !isPreparingPreview && !isPreviewLoading && !previewError);
+
+  const statusSummary = useMemo(() => {
+    if (!usage) {
+      return isUsageLoading ? 'Checking plan...' : 'Plan unavailable';
+    }
+
+    if (usage.plan === 'free') {
+      return `${formatPlanName(usage.plan)} | Preview: ${usage.freePreviewPages} pages`;
+    }
+
+    return `${formatPlanName(usage.plan)} | Document: ${knownTotalPages} pages | Remaining: ${usage.remainingPages ?? 'Unlimited'} pages`;
+  }, [isUsageLoading, knownTotalPages, usage]);
 
   const loadUsage = useCallback(async () => {
     if (!isLoaded || !isSignedIn) {
@@ -96,7 +272,6 @@ function TranslatePageContent() {
     }
 
     setIsUsageLoading(true);
-
     try {
       const token = await getToken({ skipCache: true });
       const response = await getMyUsage(token);
@@ -108,43 +283,114 @@ function TranslatePageContent() {
     }
   }, [getToken, isLoaded, isSignedIn]);
 
+  const loadPreview = useCallback(
+    async (activeTaskId: string) => {
+      let objectUrl: string | null = null;
+      setIsPreviewLoading(true);
+      setPreviewError('');
+
+      try {
+        const token = await getToken({ skipCache: true });
+        const response = await fetch(`/api/export/${activeTaskId}?format=pdf&output_type=bilingual&v=${previewVersion}`, {
+          cache: 'no-store',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (!response.ok) {
+          throw new Error('Failed to load preview');
+        }
+
+        const blob = await response.blob();
+        objectUrl = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }));
+        setPreviewObjectUrl((current) => {
+          if (current) {
+            URL.revokeObjectURL(current);
+          }
+          return objectUrl;
+        });
+      } catch (previewLoadError) {
+        setPreviewError(
+          previewLoadError instanceof Error
+            ? previewLoadError.message
+            : 'Failed to load preview. Please try downloading the file instead.'
+        );
+        setIsPreviewLoading(false);
+      }
+    },
+    [getToken, previewVersion]
+  );
+
+  const loadOriginalPreview = useCallback(async () => {
+    if (!fileId || !isLoaded || !isSignedIn) {
+      return;
+    }
+
+    try {
+      const token = await getToken({ skipCache: true });
+      const blob = await getOriginalFilePreviewBlob(fileId, token);
+      const imageBlob = blob.type.startsWith('image/') ? blob : new Blob([blob], { type: 'image/png' });
+      const objectUrl = URL.createObjectURL(imageBlob);
+      setOriginalPreviewObjectUrl((current) => {
+        if (current) {
+          URL.revokeObjectURL(current);
+        }
+        return objectUrl;
+      });
+    } catch {
+      setOriginalPreviewObjectUrl(null);
+    }
+  }, [fileId, getToken, isLoaded, isSignedIn]);
+
   const startTranslate = async () => {
-    if (!fileId) return;
+    if (!fileId) {
+      return;
+    }
     if (!isSignedIn) {
       setError('Please sign in before translating this file.');
       return;
     }
-
     if (isStartBlocked) {
       setError('This file exceeds your current plan limits. Please upgrade to continue.');
       return;
     }
-    
-    setIsTranslating(true);
+
+    setIsStarting(true);
     setError('');
-    
+    setProgress((current) => ({
+      ...current,
+      status: 'processing',
+      progress: current.progress || 0,
+      processedPages: current.processedPages || 0,
+      translatedPages: current.translatedPages || 0,
+      totalPages: current.totalPages || initialTotalPages,
+      requestedPages: current.requestedPages || initialTotalPages,
+    }));
+
     try {
       const token = await getToken({ skipCache: true });
-      const response = await startTranslation({
-        fileId,
-        sourceLang,
-        targetLang,
-      }, token);
-      
-      if (response.success) {
-        setTaskId(response.taskId);
-      } else {
-        setError('Failed to start translation');
+      const response = await startTranslation({ fileId, sourceLang, targetLang }, token);
+      if (!response.success) {
+        throw new Error('Failed to start translation.');
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred. Please try again.');
+      setTaskId(response.taskId);
+      setProgress((current) => ({
+        ...current,
+        status: 'processing',
+        progress: current.progress || 0,
+        totalPages: response.totalPages || current.totalPages || initialTotalPages,
+        requestedPages: response.requestedPages,
+        isPartial: response.isPartial,
+      }));
+    } catch (startError) {
+      setError(startError instanceof Error ? startError.message : 'An error occurred.');
     } finally {
-      setIsTranslating(false);
+      setIsStarting(false);
     }
   };
 
   const pollProgress = useCallback(async () => {
-    if (!taskId) return;
+    if (!taskId) {
+      return;
+    }
 
     try {
       const token = await getToken({ skipCache: true });
@@ -156,24 +402,53 @@ function TranslatePageContent() {
         const resultData = await getTranslationResult(taskId, token);
         setResult(resultData);
         setIsPreparingPreview(false);
+        await loadPreview(taskId);
       } else if (progressData.status === 'processing') {
         setTimeout(pollProgress, 2000);
+      } else {
+        setError(progressData.error || 'Translation task failed.');
       }
-    } catch (err) {
+    } catch (pollError) {
       setIsPreparingPreview(false);
-      setError(err instanceof Error ? err.message : 'Failed to get translation progress');
+      setError(pollError instanceof Error ? pollError.message : 'Failed to get translation progress.');
     }
-  }, [getToken, taskId]);
-
-  useEffect(() => {
-    if (taskId && progress.status === 'processing') {
-      pollProgress();
-    }
-  }, [taskId, pollProgress, progress.status]);
+  }, [getToken, loadPreview, taskId]);
 
   useEffect(() => {
     loadUsage();
   }, [loadUsage]);
+
+  useEffect(() => {
+    loadOriginalPreview();
+  }, [loadOriginalPreview]);
+
+  useEffect(() => {
+    return () => {
+      if (originalPreviewObjectUrl) {
+        URL.revokeObjectURL(originalPreviewObjectUrl);
+      }
+    };
+  }, [originalPreviewObjectUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (previewObjectUrl) {
+        URL.revokeObjectURL(previewObjectUrl);
+      }
+    };
+  }, [previewObjectUrl]);
+
+  useEffect(() => {
+    if (!fileId) {
+      router.push('/');
+    }
+  }, [fileId, router]);
+
+  useEffect(() => {
+    if (taskId && progress.status === 'processing' && !result) {
+      pollProgress();
+    }
+  }, [pollProgress, progress.status, result, taskId]);
 
   useEffect(() => {
     async function loadExistingResult() {
@@ -192,26 +467,51 @@ function TranslatePageContent() {
         if (progressData.status === 'completed') {
           const resultData = await getTranslationResult(initialTaskId, token);
           setResult(resultData);
+          await loadPreview(initialTaskId);
         } else if (progressData.status === 'processing') {
           setTaskId(initialTaskId);
         } else {
-          setError(progressData.error || 'Translation task failed');
+          setError(progressData.error || 'Translation task failed.');
         }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load translation result');
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : 'Failed to load translation result.');
       } finally {
         setIsPreparingPreview(false);
       }
     }
 
     loadExistingResult();
-  }, [getToken, initialTaskId, isLoaded, isSignedIn, result]);
+  }, [getToken, initialTaskId, isLoaded, isSignedIn, loadPreview, result]);
 
-  useEffect(() => {
-    if (!fileId) {
-      router.push('/');
+  const handleDownload = async (type: DownloadType) => {
+    if (!taskId || downloadingType) {
+      return;
     }
-  }, [fileId, router]);
+
+    setDownloadingType(type);
+    try {
+      const token = await getToken({ skipCache: true });
+      const blob = await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
+      const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
+      const objectUrl = URL.createObjectURL(pdfBlob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `${displayFileName.replace(/\.pdf$/i, '')}_${type}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      setIsDownloadOpen(false);
+    } catch (downloadError) {
+      setError(downloadError instanceof Error ? downloadError.message : 'Failed to download file.');
+    } finally {
+      setDownloadingType(null);
+    }
+  };
+
+  const handleClose = () => {
+    router.back();
+  };
 
   if (!fileId) {
     return null;
@@ -219,192 +519,202 @@ function TranslatePageContent() {
 
   if (isLoaded && !isSignedIn) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
-        <Header />
-        <section className="max-w-xl mx-auto px-4 py-24">
-          <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
-            <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
-              Sign in required
-            </h1>
-            <p className="text-gray-600 mb-6">
-              Please sign in to translate files and access your private results.
-            </p>
-            <SignInButton mode="modal">
-              <button className="px-6 py-3 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
-                Sign in
-              </button>
-            </SignInButton>
+      <div className="app-shell">
+        <div className="border-b border-slate-100 bg-white">
+          <div className="flex h-14 items-center px-4">
+            <button type="button" onClick={handleClose} className="text-slate-400 transition-colors hover:text-slate-900">
+              <X className="size-4" strokeWidth={2} />
+            </button>
           </div>
-        </section>
+        </div>
+        <div className="flex min-h-[calc(100vh-56px)] items-center justify-center px-4">
+          <div className="w-full max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
+            <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Sign in required</h1>
+            <p className="mt-4 text-[16px] leading-relaxed text-slate-600">Please sign in to translate files and access your private results.</p>
+            <div className="mt-8">
+              <SignInButton mode="modal">
+                <button className="rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white">Sign in</button>
+              </SignInButton>
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
-      <Header />
-
-      <section className="max-w-6xl mx-auto px-4 py-8">
-        <motion.div
-          className="mb-8"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-        >
+    <div className="app-shell flex h-screen flex-col overflow-hidden bg-white">
+      <div className="border-b border-slate-100 bg-white">
+        <div className="flex h-14 w-full items-center justify-between px-4">
           <button
-            onClick={() => router.push('/')}
-            className="flex items-center gap-2 text-gray-600 hover:text-primary-600 mb-4 transition-colors"
+            type="button"
+            onClick={handleClose}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-900"
+            aria-label="Close"
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-            </svg>
-            <span>Back to Home</span>
+            <X className="size-4" strokeWidth={2} />
           </button>
 
-          <h1 className="font-display text-3xl font-bold text-gray-900 mb-2">
-            Translating File
-          </h1>
-          <p className="text-gray-600">
-            File: <span className="font-medium text-gray-800 break-all">{displayFileName}</span>
-          </p>
-        </motion.div>
-
-        <AnimatePresence mode="wait">
-          {!result ? (
-            <motion.div
-              key="progress"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-            >
-              <div className="bg-white/70 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 mb-8">
-                <LanguageSelector
-                  sourceLang={sourceLang}
-                  targetLang={targetLang}
-                  onSourceLangChange={setSourceLang}
-                  onTargetLangChange={setTargetLang}
-                  disabled={isTranslating || !!taskId}
-                />
-
-                {!taskId && (
-                  <>
-                    <div className={`mt-6 rounded-2xl border p-5 ${
-                      isStartBlocked
-                        ? 'border-amber-200 bg-amber-50/90'
-                        : 'border-primary-100 bg-primary-50/60'
-                    }`}>
-                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                        <div>
-                          <p className="text-sm font-semibold text-gray-900">
-                            Translation check
-                          </p>
-                          <p className="mt-2 text-sm text-gray-600">
-                            {isUsageLoading
-                              ? 'Checking your current plan and page allowance...'
-                              : isFreePlan
-                                ? `Free plan will translate the first ${freePreviewPages} page${freePreviewPages === 1 ? '' : 's'} as a preview${knownTotalPages ? ` from this ${knownTotalPages}-page file` : ''}.`
-                                : knownTotalPages
-                                  ? `This translation will use ${knownTotalPages} page${knownTotalPages === 1 ? '' : 's'} from your ${usage?.plan || 'current'} plan.`
-                                  : 'This file will be checked against your plan limits before translation starts.'}
-                          </p>
-                          {!isFreePlan && usage && usage.remainingPages !== null && (
-                            <p className="mt-2 text-xs text-gray-500">
-                              Remaining this month: {usage.remainingPages} / {usage.monthlyPageQuota} pages.
-                            </p>
-                          )}
-                          {exceedsPaidFileLimit && usage && (
-                            <p className="mt-2 text-sm font-medium text-amber-700">
-                              Your plan supports up to {usage.maxPagesPerFile} pages per PDF.
-                            </p>
-                          )}
-                          {exceedsPaidMonthlyQuota && usage && (
-                            <p className="mt-2 text-sm font-medium text-amber-700">
-                              You do not have enough remaining pages this month.
-                            </p>
-                          )}
-                        </div>
-                        {isStartBlocked && (
-                          <a href="/pricing" className="text-sm font-semibold text-primary-600 hover:text-primary-700">
-                            View plans
-                          </a>
-                        )}
-                      </div>
-                    </div>
-
-                    <motion.button
-                      onClick={startTranslate}
-                      disabled={isTranslating || !isLoaded || !isSignedIn || isStartBlocked}
-                      className="w-full mt-6 py-4 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed"
-                      whileHover={{ scale: 1.01 }}
-                      whileTap={{ scale: 0.99 }}
-                    >
-                      {isTranslating ? 'Starting...' : isFreePlan ? 'Start Free Preview' : 'Start Translation'}
-                    </motion.button>
-                  </>
-                )}
-              </div>
-
-              {taskId && <ProgressBar progress={progress} />}
-
-              {taskId && isPreparingPreview && (
-                <motion.div
-                  className="mt-6 bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg border border-white/60 text-center"
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
+          <div className="flex flex-1 justify-center">
+            <div className="flex items-center gap-3">
+              <LanguageSelector
+                sourceLang={sourceLang}
+                targetLang={targetLang}
+                onSourceLangChange={setSourceLang}
+                onTargetLangChange={setTargetLang}
+                disabled={isProcessing || Boolean(result) || isStarting}
+              />
+              {result ? (
+                <span className="inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-4 py-1.5 text-[13px] font-medium text-green-700">
+                  <CheckCircle2 className="size-4" strokeWidth={2} />
+                  Complete
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={startTranslate}
+                  disabled={!isLoaded || !isSignedIn || isProcessing || isStarting || isStartBlocked}
+                  className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold text-white transition-colors ${
+                    isProcessing || isStarting ? 'bg-slate-300 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-700'
+                  } disabled:cursor-not-allowed`}
                 >
-                  <div className="mx-auto mb-4 h-10 w-10 rounded-full border-4 border-primary-100 border-t-primary-500 animate-spin" />
-                  <h3 className="text-lg font-semibold text-gray-800">Preparing File Preview</h3>
-                  <p className="mt-2 text-sm text-gray-500">
-                    Translation is complete. Generating the preview can take a few seconds for layout-heavy files.
-                  </p>
-                </motion.div>
+                  {isStarting ? 'Starting...' : isProcessing ? 'Translating...' : 'Translate'}
+                </button>
               )}
+            </div>
+          </div>
 
-              {error && (
-                <motion.div
-                  className="mt-4 text-center"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                >
-                  <p className="text-red-500">{error}</p>
-                  {shouldShowPricingLink(error) && (
-                    <a href="/pricing" className="mt-2 inline-block text-sm font-semibold text-primary-600 hover:text-primary-700">
-                      View plans and limits
-                    </a>
-                  )}
-                </motion.div>
-              )}
-            </motion.div>
-          ) : (
-            <motion.div
-              key="result"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0 }}
-            >
-              <div className="bg-white/70 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 mb-8">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-xl font-semibold text-gray-800">Translation Complete!</h2>
-                    {result.isPartial && (
-                      <p className="mt-2 text-sm text-amber-600">
-                        You are on the Free plan, so only the first {result.translatedPages || result.pages.length} pages were translated as a preview. This file has {result.totalPages || result.pages.length} pages in total.
-                      </p>
-                    )}
-                  </div>
-                  <button
-                    onClick={() => router.push('/')}
-                    className="px-6 py-2 gradient-primary text-white font-medium rounded-xl hover:opacity-90 transition-opacity"
-                  >
-                    Translate Another File
-                  </button>
+          <div className="flex min-w-[112px] justify-end">
+            {isPreviewReady ? (
+              <button
+                type="button"
+                onClick={() => setIsDownloadOpen(true)}
+                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
+              >
+                <Download className="size-4" strokeWidth={2} />
+                Download
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {!result ? (
+        <PreviewPlaceholder
+          title={isStartingTranslation ? 'Translating your document' : 'Ready to translate'}
+          description={
+            isStartingTranslation
+              ? 'Please wait while we translate your PDF...'
+              : 'Select your target language and click the "Translate" button above to start translating your document.'
+          }
+          originalPreviewUrl={originalPreviewUrl}
+          processing={isStartingTranslation}
+          error={error}
+          footer={
+            <div className="space-y-4">
+              {!isStartingTranslation ? (
+                <p className="text-[15px] font-medium text-slate-500">
+                  {labelForLang(sourceLang)} <ArrowLeftRight className="mx-1 inline size-4" strokeWidth={2} /> {labelForLang(targetLang)}
+                </p>
+              ) : null}
+
+              {isStartingTranslation ? (
+                <div className="mx-auto w-full max-w-[420px]">
+                  <ProgressBar progress={progress} />
                 </div>
-              </div>
+              ) : (
+                <div className="rounded-xl border border-slate-200 bg-white px-6 py-3 text-[14px] font-medium text-slate-500">
+                  {statusSummary.split(' | ').map((part, index) => (
+                    <span key={part} className={index === 0 ? 'font-semibold text-slate-700' : undefined}>
+                      {index > 0 ? ' | ' : ''}
+                      {part}
+                    </span>
+                  ))}
+                </div>
+              )}
 
-              <BilingualReader taskId={taskId!} fileId={fileId!} />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </section>
+              {isFreePlan && !isStartingTranslation && usage ? (
+                <p className="mx-auto max-w-[420px] text-[13px] leading-6 text-slate-400">
+                  Free plan translates the first {usage.freePreviewPages} page{usage.freePreviewPages === 1 ? '' : 's'} of each PDF as a preview.
+                </p>
+              ) : null}
+
+              {isStartBlocked && usage && !isStartingTranslation ? (
+                <a href="/pricing" className="inline-flex text-[13px] font-semibold text-emerald-600">
+                  View plans and limits
+                </a>
+              ) : null}
+            </div>
+          }
+        />
+      ) : !previewUrl ? (
+        <PreviewPlaceholder
+          title="Loading translated document"
+          description="Preparing your translated PDF..."
+          originalPreviewUrl={originalPreviewUrl}
+          processing
+          error={previewError}
+        />
+      ) : (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50">
+          <div className="w-full min-h-0 flex-1">
+            <div className="relative h-full w-full overflow-hidden bg-white">
+              {(isPreparingPreview || isPreviewLoading || previewError) && (
+                <div className="absolute inset-0 z-10">
+                  <PreviewPlaceholder
+                    title="Loading translated document"
+                    description="Preparing your translated PDF..."
+                    originalPreviewUrl={originalPreviewUrl}
+                    processing={!previewError}
+                    error={previewError}
+                    overlay
+                  />
+                </div>
+              )}
+
+              <iframe
+                key={previewUrl}
+                src={previewUrl}
+                title="Bilingual file preview"
+                onLoad={() => setIsPreviewLoading(false)}
+                className={`h-full w-full transition-opacity duration-200 ${
+                  isPreparingPreview || isPreviewLoading || previewError ? 'opacity-0' : 'opacity-100'
+                }`}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="border-t border-slate-100 bg-white px-4 text-[12px] text-slate-400">
+        <div className="flex h-9 w-full flex-col justify-center gap-1 overflow-hidden sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
+            <span>Document: {displayFileName}</span>
+            <span>|</span>
+            <span>{knownTotalPages} pages</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            {result ? (
+              <>
+                <span className="font-medium text-emerald-600">Translation completed</span>
+                {usage ? <span>| {formatPlanName(usage.plan)}: {usage.remainingPages ?? 'Unlimited'} pages remaining this month</span> : null}
+              </>
+            ) : (
+              <>
+                {usage ? <span>{formatPlanName(usage.plan)}: {usage.remainingPages ?? 'Unlimited'} pages remaining this month</span> : null}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <DownloadModal
+        open={isDownloadOpen}
+        downloadingType={downloadingType}
+        filename={displayFileName}
+        onClose={() => setIsDownloadOpen(false)}
+        onDownload={handleDownload}
+      />
     </div>
   );
 }

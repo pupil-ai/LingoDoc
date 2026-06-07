@@ -100,7 +100,7 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
                 : `${formatNumber(remainingPages)} left`}
           </p>
           <p className="text-xs text-gray-500">
-            PDF limit: {usage.maxPagesPerFile} pages · {usage.maxFileSizeMB} MB
+            PDF limit: {usage.maxPagesPerFile} pages / {usage.maxFileSizeMB} MB
           </p>
         </div>
       </div>

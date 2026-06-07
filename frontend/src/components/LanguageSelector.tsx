@@ -1,7 +1,7 @@
 'use client';
 
-import { motion } from 'framer-motion';
 import { SUPPORTED_LANGUAGES } from '@/types';
+import { ArrowLeftRight, ChevronDown } from 'lucide-react';
 
 interface LanguageSelectorProps {
   sourceLang: string;
@@ -19,83 +19,52 @@ export function LanguageSelector({
   disabled = false,
 }: LanguageSelectorProps) {
   const swapLanguages = () => {
-    if (disabled) return;
+    if (disabled) {
+      return;
+    }
     onSourceLangChange(targetLang);
     onTargetLangChange(sourceLang);
   };
 
-  return (
-    <motion.div
-      className="flex items-center justify-center gap-4 flex-wrap"
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5 }}
-    >
-      <div className="flex-1 min-w-[200px]">
-        <label className="block text-sm font-medium text-gray-600 mb-2">
-          Source Language
-        </label>
-        <select
-          value={sourceLang}
-          onChange={(e) => onSourceLangChange(e.target.value)}
-          disabled={disabled}
-          className={`
-            w-full px-4 py-3 rounded-xl border transition-all duration-200
-            ${disabled
-              ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
-              : 'bg-white border-gray-200 hover:border-primary-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-100'
-            }
-          `}
-        >
-          {SUPPORTED_LANGUAGES.map((lang) => (
-            <option key={lang.code} value={lang.code}>
-              {lang.name}
-            </option>
-          ))}
-        </select>
-      </div>
+  const selectFields = [
+    { value: sourceLang, onChange: onSourceLangChange, label: 'Source language' },
+    { value: targetLang, onChange: onTargetLangChange, label: 'Target language' },
+  ];
 
-      <motion.button
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-3">
+      {selectFields.map((field, index) => (
+        <div key={field.label} className={index === 0 ? 'order-1' : 'order-3'}>
+          <div className="relative">
+            <select
+              value={field.value}
+              onChange={(event) => field.onChange(event.target.value)}
+              disabled={disabled}
+              className={`h-10 min-w-[90px] appearance-none rounded-lg border border-slate-200 bg-white pl-3 pr-8 py-1.5 text-[13px] font-medium text-slate-700 outline-none transition-colors ${
+                disabled ? 'cursor-not-allowed opacity-60' : 'hover:border-slate-300'
+              }`}
+              aria-label={field.label}
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.name}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 size-4 -translate-y-1/2 text-slate-400" strokeWidth={2} />
+          </div>
+        </div>
+      ))}
+
+      <button
+        type="button"
         onClick={swapLanguages}
         disabled={disabled}
-        className={`
-          mt-7 p-3 rounded-full transition-all duration-200
-          ${disabled
-            ? 'bg-gray-100 text-gray-400 cursor-not-allowed'
-            : 'bg-primary-100 text-primary-600 hover:bg-primary-200 hover:scale-110'
-          }
-        `}
-        whileHover={!disabled ? { scale: 1.1 } : {}}
-        whileTap={!disabled ? { scale: 0.9 } : {}}
+        className="order-2 inline-flex h-10 w-10 items-center justify-center rounded-lg border border-transparent bg-transparent text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+        aria-label="Swap languages"
       >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-        </svg>
-      </motion.button>
-
-      <div className="flex-1 min-w-[200px]">
-        <label className="block text-sm font-medium text-gray-600 mb-2">
-          Target Language
-        </label>
-        <select
-          value={targetLang}
-          onChange={(e) => onTargetLangChange(e.target.value)}
-          disabled={disabled}
-          className={`
-            w-full px-4 py-3 rounded-xl border transition-all duration-200
-            ${disabled
-              ? 'bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed'
-              : 'bg-white border-gray-200 hover:border-primary-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-100'
-            }
-          `}
-        >
-          {SUPPORTED_LANGUAGES.map((lang) => (
-            <option key={lang.code} value={lang.code}>
-              {lang.name}
-            </option>
-          ))}
-        </select>
-      </div>
-    </motion.div>
+        <ArrowLeftRight className="size-4" strokeWidth={2} />
+      </button>
+    </div>
   );
 }

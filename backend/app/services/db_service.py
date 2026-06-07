@@ -259,6 +259,14 @@ class DatabaseService:
             row = connection.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
         return dict(row) if row else None
 
+    def delete_file(self, file_id: str, user_id: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM files WHERE id = ? AND user_id = ?",
+                (file_id, user_id),
+            )
+        return cursor.rowcount > 0
+
     def create_translation_task(
         self,
         task_id: str,
@@ -337,6 +345,14 @@ class DatabaseService:
                 (task_id,),
             ).fetchone()
         return dict(row) if row else None
+
+    def list_file_task_ids(self, file_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM translation_tasks WHERE file_id = ?",
+                (file_id,),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]
 
     def get_current_usage_month(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m")

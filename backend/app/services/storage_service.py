@@ -15,6 +15,9 @@ class StorageService(Protocol):
     def exists(self, storage_key: str) -> bool:
         ...
 
+    def delete(self, storage_key: str) -> None:
+        ...
+
     def get_local_path(self, storage_key: str) -> str:
         ...
 
@@ -46,6 +49,11 @@ class LocalStorageService:
 
     def exists(self, storage_key: str) -> bool:
         return self._resolve_key(storage_key).exists()
+
+    def delete(self, storage_key: str) -> None:
+        target_path = self._resolve_key(storage_key)
+        if target_path.exists():
+            target_path.unlink()
 
     def get_local_path(self, storage_key: str) -> str:
         return str(self._resolve_key(storage_key))
@@ -128,6 +136,13 @@ class R2StorageService:
             return True
         except Exception:
             return False
+
+    def delete(self, storage_key: str) -> None:
+        clean_key = self._normalize_key(storage_key)
+        self.client.delete_object(Bucket=self.bucket, Key=clean_key)
+        cache_path = self._cache_path(clean_key)
+        if cache_path.exists():
+            cache_path.unlink()
 
     def get_local_path(self, storage_key: str) -> str:
         clean_key = self._normalize_key(storage_key)

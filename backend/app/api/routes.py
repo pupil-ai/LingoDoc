@@ -375,6 +375,35 @@ async def list_my_files(current_user: CurrentUser = Depends(get_current_user)):
     })
 
 
+@router.delete("/api/my/files/{file_id}")
+async def delete_my_file(file_id: str, current_user: CurrentUser = Depends(get_current_user)):
+    _sync_current_user(current_user)
+    file_record = db_service.get_file(file_id)
+    if not file_record or file_record.get("user_id") != current_user.id:
+        _raise_not_found()
+
+    task_ids = db_service.list_file_task_ids(file_id)
+
+    storage_keys_to_delete = [file_record.get("storage_key") or pdf_service.get_file_storage_key(file_id)]
+    storage_keys_to_delete.extend(
+        pdf_service.get_output_storage_key(task_id)
+        for task_id in task_ids
+    )
+
+    for storage_key in storage_keys_to_delete:
+        if storage_key and storage_service.exists(storage_key):
+            storage_service.delete(storage_key)
+
+    deleted = db_service.delete_file(file_id, current_user.id)
+    if not deleted:
+        _raise_not_found()
+
+    return JSONResponse({
+        "success": True,
+        "fileId": file_id,
+    })
+
+
 @router.get("/api/me/usage")
 async def get_my_usage(current_user: CurrentUser = Depends(get_current_user)):
     _sync_current_user(current_user)
@@ -726,4 +755,37 @@ async def get_original_file(
         media_type="application/pdf",
         filename=f"{file_id}.pdf",
         content_disposition_type="attachment" if download else "inline",
+    )
+
+
+@router.get("/api/files/{file_id}/preview")
+async def get_original_file_preview(
+    file_id: str,
+    page: int = 1,
+    width: int = 1400,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    _ensure_file_owner(file_id, current_user.id)
+    safe_width = min(max(width, 600), 2000)
+
+    try:
+        preview_bytes = pdf_service.generate_page_preview_png(
+            file_id,
+            page_num=max(page - 1, 0),
+            max_width=safe_width,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="File not found")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+    return Response(
+        preview_bytes,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "X-Content-Type-Options": "nosniff",
+        },
     )

@@ -1,28 +1,25 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { motion } from 'framer-motion';
+import { useEffect, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
+import { ArrowRight, ArrowLeftRight, Check, FileText, ShieldCheck, Sparkles } from 'lucide-react';
 import { Header } from '@/components/Header';
 import { FileUploader } from '@/components/FileUploader';
-import { UsageSummaryCard } from '@/components/UsageSummaryCard';
-import { LanguageSelector } from '@/components/LanguageSelector';
-import { FeatureCard } from '@/components/FeatureCard';
-import { getMyUsage, uploadFile } from '@/lib/api';
-import type { UsageResponse } from '@/types';
+import { uploadFile } from '@/lib/api';
+
+const SIGN_IN_UPLOAD_ERROR = 'Please sign in before uploading a file.';
+const SESSION_EXPIRED_ERROR = 'Your login session has expired. Please sign in again before uploading a file.';
 
 function ClerkSetupRequired() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+    <div className="app-shell">
       <Header />
-      <section className="max-w-xl mx-auto px-4 py-24">
-        <div className="bg-white/80 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 text-center">
-          <h1 className="font-display text-3xl font-bold text-gray-900 mb-3">
-            Clerk setup required
-          </h1>
-          <p className="text-gray-600">
-            Add your Clerk publishable key to <span className="font-mono">frontend/.env.local</span> before using login and uploads.
+      <section className="page-container py-24">
+        <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
+          <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
+          <p className="mt-4 text-[16px] leading-relaxed text-slate-600">
+            Add your Clerk publishable key to <span className="font-semibold">frontend/.env.local</span> before using login and uploads.
           </p>
         </div>
       </section>
@@ -30,59 +27,74 @@ function ClerkSetupRequired() {
   );
 }
 
-function shouldShowPricingLink(message: string): boolean {
-  const normalized = message.toLowerCase();
+function FeaturePill({ children }: { children: React.ReactNode }) {
   return (
-    normalized.includes('plan') ||
-    normalized.includes('quota') ||
-    normalized.includes('remaining') ||
-    normalized.includes('upgrade')
+    <div className="inline-flex items-center gap-2 text-[14px] font-medium text-slate-500">
+      <span className="flex size-4 items-center justify-center rounded-full border border-emerald-500 text-emerald-600">
+        <Check className="size-2.5" strokeWidth={2.5} />
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function WhyCard({
+  icon,
+  title,
+  description,
+  accent,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  accent: string;
+}) {
+  return (
+    <div className="mx-auto max-w-[320px]">
+      <div className={`mb-5 flex h-11 w-11 items-center justify-center rounded-2xl text-white shadow-md ${accent}`}>
+        {icon}
+      </div>
+      <h3 className="text-[20px] font-semibold tracking-[-0.02em] text-slate-900">{title}</h3>
+      <p className="mt-3 text-[16px] leading-7 text-slate-600">{description}</p>
+    </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="border-t border-slate-100">
+      <div className="page-container flex flex-col gap-4 py-8 text-[13px] text-slate-400 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex flex-wrap items-center gap-4">
+          <span>(c) 2026 LingoDoc</span>
+          <a href="#">Privacy</a>
+          <a href="#">Terms</a>
+          <a href="#">Help</a>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <span>support@lingodoc.com</span>
+          <span>-</span>
+          <span>Made with care for translators</span>
+        </div>
+      </div>
+    </footer>
   );
 }
 
 function HomeContent() {
   const router = useRouter();
   const { getToken, isLoaded, isSignedIn } = useAuth();
-  const [sourceLang, setSourceLang] = useState('en');
-  const [targetLang, setTargetLang] = useState('zh');
   const [isUploading, setIsUploading] = useState(false);
-  const [isUsageLoading, setIsUsageLoading] = useState(false);
-  const [usage, setUsage] = useState<UsageResponse | null>(null);
   const [error, setError] = useState('');
 
-  const loadUsage = useCallback(async () => {
-    if (!isLoaded || !isSignedIn) {
-      setUsage(null);
-      return;
-    }
-
-    setIsUsageLoading(true);
-
-    try {
-      const token = await getToken({ skipCache: true });
-      const response = await getMyUsage(token);
-      if (response.success) {
-        setUsage(response);
-      }
-    } catch {
-      setUsage(null);
-    } finally {
-      setIsUsageLoading(false);
-    }
-  }, [getToken, isLoaded, isSignedIn]);
-
   useEffect(() => {
-    loadUsage();
-  }, [loadUsage]);
+    if (isSignedIn && error === SIGN_IN_UPLOAD_ERROR) {
+      setError('');
+    }
+  }, [error, isSignedIn]);
 
   const handleFileUpload = async (file: File) => {
     if (!isLoaded) {
-      setError('Please wait while your sign-in status finishes loading.');
-      return;
-    }
-
-    if (!isSignedIn) {
-      setError('Please sign in before uploading a file.');
+      setError('Please wait while your account finishes loading.');
       return;
     }
 
@@ -91,149 +103,132 @@ function HomeContent() {
 
     try {
       const token = await getToken({ skipCache: true });
-      const response = await uploadFile(file, token);
-      if (response.success) {
-        const params = new URLSearchParams({
-          fileId: response.fileId,
-          filename: response.filename || file.name,
-          totalPages: String(response.totalPages),
-          sourceLang,
-          targetLang,
-        });
-        router.push(`/translate?${params.toString()}`);
-      } else {
-        setError('Failed to upload file');
+      if (!token) {
+        setError(isSignedIn ? SESSION_EXPIRED_ERROR : SIGN_IN_UPLOAD_ERROR);
+        return;
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred during upload. Please try again.');
+      const response = await uploadFile(file, token);
+      if (!response.success) {
+        throw new Error('Failed to upload file.');
+      }
+
+      const params = new URLSearchParams({
+        fileId: response.fileId,
+        filename: response.filename || file.name,
+        totalPages: String(response.totalPages),
+        sourceLang: 'en',
+        targetLang: 'zh',
+      });
+      router.push(`/translate?${params.toString()}`);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'An error occurred during upload.');
     } finally {
       setIsUploading(false);
     }
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-cyan-50">
+    <div className="app-shell">
       <Header />
 
-      <section className="max-w-6xl mx-auto px-4 py-16">
-        <motion.div
-          className="text-center mb-12"
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 }}
-        >
-          <motion.div
-            className="inline-flex items-center gap-2 px-4 py-2 bg-primary-100 rounded-full text-primary-700 text-sm font-medium mb-6"
-            initial={{ scale: 0 }}
-            animate={{ scale: 1 }}
-            transition={{ delay: 0.2, type: 'spring' }}
-          >
-            <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-            Supports large PDF files up to 3000 pages
-          </motion.div>
-          <h1 className="font-display text-4xl md:text-5xl lg:text-6xl font-bold text-gray-900 mb-6">
-            Translate PDF Documents
-            <br />
-            <span className="gradient-text">Easily & Accurately</span>
-          </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Upload your PDF files, select your languages, and get accurate translations
-            while preserving the original layout. Perfect for academic papers, technical documents, and more.
-          </p>
-        </motion.div>
+      <main>
+        <section className="page-container flex flex-col items-center pb-20 pt-8 text-center sm:pb-28 sm:pt-14">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[12px] font-semibold text-emerald-600">
+            <Sparkles className="size-3" strokeWidth={2} />
+            Powered by Advanced AI
+          </span>
 
-        <motion.div
-          className="bg-white/70 backdrop-blur-sm rounded-3xl p-8 shadow-xl border border-white/50 mb-16"
-          initial={{ opacity: 0, y: 30 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5, delay: 0.2 }}
-        >
-          <div className="mb-8">
-            <LanguageSelector
-              sourceLang={sourceLang}
-              targetLang={targetLang}
-              onSourceLangChange={setSourceLang}
-              onTargetLangChange={setTargetLang}
-              disabled={isUploading}
-            />
+          <h1 className="mt-8 max-w-[860px] text-[56px] font-bold leading-[1.1] tracking-[-0.06em] text-slate-900">
+            Translate PDFs with
+            <br />
+            bilingual side-by-side view
+          </h1>
+
+          <p className="mt-5 max-w-[720px] text-[17px] leading-relaxed text-slate-600">
+            Preserve original layout, compare source and translation side-by-side,
+            and handle large documents up to 3,000 pages.
+          </p>
+
+          <div className="mt-12 w-full max-w-[860px]">
+            <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded} />
+            <p className="mt-4 text-center text-[12px] font-medium text-slate-400">Supports large PDF files</p>
+            {error && <p className="mt-4 text-center text-sm font-semibold text-red-600">{error}</p>}
+            {!isSignedIn && isLoaded && (
+              <div className="mt-6">
+                <SignInButton mode="modal">
+                  <button className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-900 transition-all hover:bg-slate-50">
+                    Sign in to upload
+                  </button>
+                </SignInButton>
+              </div>
+            )}
           </div>
 
-          {isSignedIn && (
-            <div className="mb-6">
-              <UsageSummaryCard usage={usage} isLoading={isUsageLoading} />
+          <div className="mt-10 flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
+            <FeaturePill>Original layout preserved</FeaturePill>
+            <FeaturePill>Side-by-side comparison</FeaturePill>
+            <FeaturePill>Bilingual PDF export</FeaturePill>
+          </div>
+        </section>
+
+        <section className="border-y border-slate-100 bg-white">
+          <div className="page-container py-16 sm:py-24">
+            <p className="text-center text-[12px] font-bold tracking-[0.08em] text-slate-500">WHY LINGODOC</p>
+            <h2 className="mt-4 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">
+              Professional translation, simplified
+            </h2>
+
+            <div className="mt-16 grid gap-10 lg:grid-cols-3">
+              <WhyCard
+                icon={<ShieldCheck className="size-5" strokeWidth={2} />}
+                title="Layout preserved"
+                description="Tables, images, fonts, and formatting stay intact. Your translated document maintains the original structure."
+                accent="bg-gradient-to-br from-slate-900 to-slate-700"
+              />
+              <WhyCard
+                icon={<ArrowLeftRight className="size-5" strokeWidth={2} />}
+                title="Side-by-side reading"
+                description="Compare original and translation in a split view. Perfect for learning or verifying translations."
+                accent="bg-gradient-to-br from-emerald-600 to-emerald-500"
+              />
+              <WhyCard
+                icon={<FileText className="size-5" strokeWidth={2} />}
+                title="Flexible export"
+                description="Download bilingual PDFs with side-by-side view, or translation-only versions. Supports documents up to 3,000 pages."
+                accent="bg-gradient-to-br from-slate-700 to-slate-600"
+              />
             </div>
-          )}
+          </div>
+        </section>
 
-          <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded || !isSignedIn} />
-
-          {!isSignedIn && (
-            <div className="mt-6 rounded-2xl border border-primary-100 bg-primary-50/80 p-5 text-center">
-              <p className="mb-4 text-sm font-medium text-primary-800">
-                Sign in to upload documents and keep your translation files private.
-              </p>
-              <SignInButton mode="modal">
-                <button className="px-5 py-2 gradient-primary text-white font-semibold rounded-xl hover:opacity-90 transition-opacity">
-                  Sign in to start
-                </button>
-              </SignInButton>
+        <section className="page-container py-14 sm:py-20">
+          <div className="mx-auto max-w-[820px] rounded-[28px] bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-8 py-14 text-center text-white shadow-xl">
+            <h2 className="text-[48px] font-bold tracking-[-0.05em]">Ready to translate?</h2>
+            <p className="mx-auto mt-4 max-w-[620px] text-[17px] leading-relaxed text-slate-300">
+              Professional PDF translation with bilingual output and original layout preservation.
+            </p>
+            <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
+              <button
+                type="button"
+                onClick={() => router.push('/')}
+                className="inline-flex items-center gap-2 rounded-xl bg-white px-5 py-3 text-[14px] font-semibold text-slate-900 transition-all hover:-translate-y-0.5"
+              >
+                Upload your first file
+                <ArrowRight className="size-4" strokeWidth={2} />
+              </button>
+              <button
+                type="button"
+                onClick={() => router.push('/pricing')}
+                className="inline-flex items-center rounded-xl bg-slate-700 px-5 py-3 text-[14px] font-semibold text-white transition-colors hover:bg-slate-600"
+              >
+                View pricing
+              </button>
             </div>
-          )}
+          </div>
+        </section>
+      </main>
 
-          {error && (
-            <motion.div
-              className="mt-4 text-center"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-            >
-              <p className="text-red-500">{error}</p>
-              {shouldShowPricingLink(error) && (
-                <a href="/pricing" className="mt-2 inline-block text-sm font-semibold text-primary-600 hover:text-primary-700">
-                  View plans and limits
-                </a>
-              )}
-            </motion.div>
-          )}
-        </motion.div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <FeatureCard
-            icon={
-              <svg className="w-7 h-7 text-primary-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-              </svg>
-            }
-            title="Large File Support"
-            description="Handles PDF files with up to 3000 pages efficiently, ensuring smooth translation even for academic theses and lengthy documents."
-            delay={0.3}
-          />
-          <FeatureCard
-            icon={
-              <svg className="w-7 h-7 text-cyan-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-              </svg>
-            }
-            title="Preserve Layout"
-            description="Maintains the original document formatting, including fonts, spacing, images, and table structures."
-            delay={0.4}
-          />
-          <FeatureCard
-            icon={
-              <svg className="w-7 h-7 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9" />
-              </svg>
-            }
-            title="Bilingual Reading"
-            description="View original and translated content side by side with synchronized scrolling for easy comparison."
-            delay={0.5}
-          />
-        </div>
-      </section>
-
-      <footer className="bg-white border-t border-gray-100 mt-16">
-        <div className="max-w-6xl mx-auto px-4 py-8 text-center text-gray-500 text-sm">
-          <p>LingoDoc - Fast, accurate PDF translation service</p>
-        </div>
-      </footer>
+      <Footer />
     </div>
   );
 }

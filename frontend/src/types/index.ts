@@ -85,6 +85,11 @@ export interface MyFilesResponse {
   files: MyFileRecord[];
 }
 
+export interface DeleteFileResponse {
+  success: boolean;
+  fileId: string;
+}
+
 export interface UsageResponse {
   success: boolean;
   plan: string;
