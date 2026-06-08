@@ -300,6 +300,10 @@ function DashboardContent() {
       params.set('taskId', file.task_id);
     }
 
+    if (file.status) {
+      params.set('status', file.status);
+    }
+
     router.push(`/translate?${params.toString()}`);
   };
 

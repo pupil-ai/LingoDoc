@@ -1,7 +1,7 @@
 'use client';
 
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { ArrowLeftRight, CheckCircle2, Download, FileText, Info, Loader2, X } from 'lucide-react';
@@ -230,12 +230,13 @@ function TranslatePageContent() {
   const filename = searchParams.get('filename');
   const initialTotalPages = Number(searchParams.get('totalPages') || '0');
   const initialTaskId = searchParams.get('taskId');
+  const initialTaskStatus = searchParams.get('status');
   const initialSourceLang = searchParams.get('sourceLang') || 'en';
   const initialTargetLang = searchParams.get('targetLang') || 'zh';
 
   const [sourceLang, setSourceLang] = useState(initialSourceLang);
   const [targetLang, setTargetLang] = useState(initialTargetLang);
-  const [taskId, setTaskId] = useState<string | null>(initialTaskId);
+  const [taskId, setTaskId] = useState<string | null>(null);
   const [progress, setProgress] = useState<TranslationProgress>({
     status: 'processing',
     progress: 0,
@@ -257,6 +258,10 @@ function TranslatePageContent() {
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
   const [downloadToast, setDownloadToast] = useState<ToastState>(null);
+  const isCompletedHistoryEntry = initialTaskStatus === 'completed';
+  const isProcessingHistoryEntry = initialTaskStatus === 'processing';
+  const [isRestoringCompletedTask, setIsRestoringCompletedTask] = useState(Boolean(initialTaskId && isCompletedHistoryEntry));
+  const restoredCompletedTaskIdRef = useRef<string | null>(null);
 
   const displayFileName = filename || fileId || 'document.pdf';
   const knownTotalPages = progress.totalPages || result?.totalPages || initialTotalPages || 0;
@@ -277,6 +282,7 @@ function TranslatePageContent() {
   );
   const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota;
   const isProcessing = Boolean(taskId) && !result;
+  const isRestoringCompletedResult = Boolean(initialTaskId && isCompletedHistoryEntry) && !result && (isRestoringCompletedTask || isPreparingPreview);
   const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
   const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
   const previewUrl = useMemo(
@@ -498,18 +504,41 @@ function TranslatePageContent() {
   }, [fileId, router]);
 
   useEffect(() => {
-    if (taskId && progress.status === 'processing' && !result) {
+    if (!isRestoringCompletedTask && taskId && progress.status === 'processing' && !result) {
       pollProgress();
     }
-  }, [pollProgress, progress.status, result, taskId]);
+  }, [isRestoringCompletedTask, pollProgress, progress.status, result, taskId]);
+
+  useEffect(() => {
+    if (!initialTaskId || !isProcessingHistoryEntry || taskId || result) {
+      return;
+    }
+
+    setTaskId(initialTaskId);
+    setProgress((current) => ({
+      ...current,
+      status: 'processing',
+      totalPages: current.totalPages || initialTotalPages,
+      requestedPages: current.requestedPages || initialTotalPages,
+    }));
+  }, [initialTaskId, initialTotalPages, isProcessingHistoryEntry, result, taskId]);
 
   useEffect(() => {
     async function loadExistingResult() {
-      if (!initialTaskId || !isLoaded || !isSignedIn || result) {
+      if (
+        !initialTaskId ||
+        !isCompletedHistoryEntry ||
+        !isLoaded ||
+        !isSignedIn ||
+        result ||
+        restoredCompletedTaskIdRef.current === initialTaskId
+      ) {
         return;
       }
 
+      restoredCompletedTaskIdRef.current = initialTaskId;
       setIsPreparingPreview(true);
+      setIsRestoringCompletedTask(true);
       setError('');
 
       try {
@@ -518,6 +547,7 @@ function TranslatePageContent() {
         setProgress(progressData);
 
         if (progressData.status === 'completed') {
+          setTaskId(initialTaskId);
           const resultData = await getTranslationResult(initialTaskId, token);
           setResult(resultData);
           await loadPreview(initialTaskId);
@@ -530,11 +560,12 @@ function TranslatePageContent() {
         setError(loadError instanceof Error ? loadError.message : 'Failed to load translation result.');
       } finally {
         setIsPreparingPreview(false);
+        setIsRestoringCompletedTask(false);
       }
     }
 
     loadExistingResult();
-  }, [getToken, initialTaskId, isLoaded, isSignedIn, loadPreview, result]);
+  }, [getToken, initialTaskId, isCompletedHistoryEntry, isLoaded, isSignedIn, loadPreview, result]);
 
   const handleDownload = async (type: DownloadType) => {
     if (!taskId || downloadingType) {
@@ -683,28 +714,36 @@ function TranslatePageContent() {
 
       {!result ? (
         <PreviewPlaceholder
-          title={isStartingTranslation ? 'Translating your document' : 'Ready to translate'}
+          title={
+            isRestoringCompletedResult
+              ? 'Loading translated document'
+              : isStartingTranslation
+                ? 'Translating your document'
+                : 'Ready to translate'
+          }
           description={
-            isStartingTranslation
+            isRestoringCompletedResult
+              ? 'Preparing your translated PDF...'
+              : isStartingTranslation
               ? 'Please wait while we translate your PDF...'
               : 'Select your target language and click the "Translate" button above to start translating your document.'
           }
           originalPreviewUrl={originalPreviewUrl}
-          processing={isStartingTranslation}
+          processing={isStartingTranslation || isRestoringCompletedResult}
           error={error}
           footer={
             <div className="space-y-4">
-              {!isStartingTranslation ? (
+              {!isStartingTranslation && !isRestoringCompletedResult ? (
                 <p className="text-[15px] font-medium text-slate-500">
                   {labelForLang(sourceLang)} <ArrowLeftRight className="mx-1 inline size-4" strokeWidth={2} /> {labelForLang(targetLang)}
                 </p>
               ) : null}
 
-              {isStartingTranslation ? (
+              {isStartingTranslation && !isRestoringCompletedResult ? (
                 <div className="mx-auto w-full max-w-[420px]">
                   <ProgressBar progress={progress} />
                 </div>
-              ) : (
+              ) : !isRestoringCompletedResult ? (
                 <div className="rounded-xl border border-slate-200 bg-white px-6 py-3 text-[14px] font-medium text-slate-500">
                   {statusSummary.split(' | ').map((part, index) => (
                     <span key={part} className={index === 0 ? 'font-semibold text-slate-700' : undefined}>
@@ -713,15 +752,15 @@ function TranslatePageContent() {
                     </span>
                   ))}
                 </div>
-              )}
+              ) : null}
 
-              {isFreePlan && !isStartingTranslation && usage ? (
+              {isFreePlan && !isStartingTranslation && !isRestoringCompletedResult && usage ? (
                 <p className="mx-auto max-w-[420px] text-[13px] leading-6 text-slate-400">
                   Free plan translates the first {usage.freePreviewPages} page{usage.freePreviewPages === 1 ? '' : 's'} of each PDF as a preview.
                 </p>
               ) : null}
 
-              {isStartBlocked && usage && !isStartingTranslation ? (
+              {isStartBlocked && usage && !isStartingTranslation && !isRestoringCompletedResult ? (
                 <a href="/pricing" className="inline-flex text-[13px] font-semibold text-emerald-600">
                   View plans and limits
                 </a>
