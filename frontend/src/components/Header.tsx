@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { SignInButton, UserButton, useAuth } from '@clerk/nextjs';
+import { useAuth, useClerk, useUser } from '@clerk/nextjs';
 import { usePathname } from 'next/navigation';
 import { Sparkles } from 'lucide-react';
+
+let cachedHasValidSession = false;
 
 function BrandMark() {
   return (
@@ -16,13 +18,21 @@ function BrandMark() {
 
 function HeaderAuthActions() {
   const { getToken, isLoaded, isSignedIn } = useAuth();
-  const [hasValidSession, setHasValidSession] = useState(false);
+  const { openSignIn, openUserProfile } = useClerk();
+  const { user } = useUser();
+  const [hasValidSession, setHasValidSession] = useState(cachedHasValidSession);
 
   useEffect(() => {
     let cancelled = false;
 
     async function checkSession() {
-      if (!isLoaded || !isSignedIn) {
+      if (!isLoaded) {
+        setHasValidSession(cachedHasValidSession);
+        return;
+      }
+
+      if (!isSignedIn) {
+        cachedHasValidSession = false;
         setHasValidSession(false);
         return;
       }
@@ -30,10 +40,13 @@ function HeaderAuthActions() {
       try {
         const token = await getToken({ skipCache: true });
         if (!cancelled) {
-          setHasValidSession(Boolean(token));
+          const nextState = Boolean(token);
+          cachedHasValidSession = nextState;
+          setHasValidSession(nextState);
         }
       } catch {
         if (!cancelled) {
+          cachedHasValidSession = false;
           setHasValidSession(false);
         }
       }
@@ -46,16 +59,41 @@ function HeaderAuthActions() {
     };
   }, [getToken, isLoaded, isSignedIn]);
 
-  if (hasValidSession) {
-    return <UserButton />;
+  if (hasValidSession === true) {
+    const avatarUrl = user?.imageUrl;
+    const displayName =
+      user?.fullName ||
+      [user?.firstName, user?.lastName].filter(Boolean).join(' ') ||
+      user?.primaryEmailAddress?.emailAddress ||
+      'Account';
+
+    return (
+      <button
+        type="button"
+        onClick={() => openUserProfile()}
+        className="inline-flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-100 transition-colors hover:border-slate-300 hover:bg-slate-200"
+        aria-label={`Open account settings for ${displayName}`}
+        title={displayName}
+      >
+        {avatarUrl ? (
+          <img src={avatarUrl} alt={displayName} className="h-full w-full object-cover" />
+        ) : (
+          <span className="text-[12px] font-semibold text-slate-700">
+            {displayName.trim().charAt(0).toUpperCase() || 'A'}
+          </span>
+        )}
+      </button>
+    );
   }
 
   return (
-    <SignInButton mode="modal">
-      <button className="inline-flex items-center rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-all hover:bg-slate-800">
-        Sign In
-      </button>
-    </SignInButton>
+    <button
+      type="button"
+      onClick={() => openSignIn()}
+      className="inline-flex items-center rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-all hover:bg-slate-800"
+    >
+      Sign In
+    </button>
   );
 }
 
@@ -69,7 +107,7 @@ export function Header() {
   ];
 
   return (
-    <header className="border-b border-[var(--color-line)] bg-white/95 backdrop-blur-sm">
+    <header className="sticky top-0 z-40 border-b border-[var(--color-line)] bg-white/95 backdrop-blur-sm">
       <div className="page-container flex h-14 items-center justify-between">
         <Link href="/" className="flex items-center gap-2.5">
           <BrandMark />

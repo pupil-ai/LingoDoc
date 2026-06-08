@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeftRight, CheckCircle2, Download, FileText, Loader2, X } from 'lucide-react';
+import { ArrowLeftRight, CheckCircle2, Download, FileText, Info, Loader2, X } from 'lucide-react';
 import { LanguageSelector } from '@/components/LanguageSelector';
 import { ProgressBar } from '@/components/ProgressBar';
 import {
@@ -18,6 +18,12 @@ import {
 import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
 
 type DownloadType = 'bilingual' | 'translated';
+type ToastState =
+  | {
+      type: 'loading' | 'success' | 'error';
+      message: string;
+    }
+  | null;
 
 function ClerkSetupRequired() {
   return (
@@ -121,13 +127,11 @@ function PreviewPlaceholder({
 
 function DownloadModal({
   open,
-  downloadingType,
   filename,
   onClose,
   onDownload,
 }: {
   open: boolean;
-  downloadingType: DownloadType | null;
   filename: string;
   onClose: () => void;
   onDownload: (type: DownloadType) => void;
@@ -170,7 +174,6 @@ function DownloadModal({
               key={card.type}
               type="button"
               onClick={() => onDownload(card.type)}
-              disabled={Boolean(downloadingType)}
               className="flex w-full items-start gap-4 rounded-2xl border border-slate-200 bg-white p-4 text-left transition-all hover:border-slate-300 hover:bg-slate-50 disabled:opacity-70"
             >
               <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600">
@@ -183,9 +186,36 @@ function DownloadModal({
               <Download className="mt-1 size-4 shrink-0 text-slate-300" strokeWidth={2} />
             </button>
           ))}
+
         </div>
 
         <div className="border-t border-slate-100 px-5 py-4 text-[12px] text-slate-400">File name: {filename}</div>
+      </div>
+    </div>
+  );
+}
+
+function DownloadToast({
+  toast,
+}: {
+  toast: ToastState;
+}) {
+  if (!toast) {
+    return null;
+  }
+
+  const styles =
+    toast.type === 'error'
+      ? 'border-red-200 bg-red-50 text-red-700'
+      : toast.type === 'success'
+        ? 'border-green-200 bg-green-50 text-green-700'
+        : 'border-slate-200 bg-white text-slate-700';
+
+  return (
+    <div className="pointer-events-none fixed bottom-14 left-1/2 z-50 -translate-x-1/2 px-4">
+      <div className={`flex min-w-[260px] items-center gap-3 rounded-xl border px-4 py-3 text-[13px] font-medium shadow-xl ${styles}`}>
+        {toast.type === 'loading' ? <Loader2 className="size-4 animate-spin" strokeWidth={2} /> : null}
+        <span>{toast.message}</span>
       </div>
     </div>
   );
@@ -218,6 +248,7 @@ function TranslatePageContent() {
   const [isStarting, setIsStarting] = useState(false);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [originalPreviewObjectUrl, setOriginalPreviewObjectUrl] = useState<string | null>(null);
+  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
   const [previewObjectUrl, setPreviewObjectUrl] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState('');
   const [previewVersion] = useState(() => Date.now().toString());
@@ -225,6 +256,7 @@ function TranslatePageContent() {
   const [error, setError] = useState('');
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
+  const [downloadToast, setDownloadToast] = useState<ToastState>(null);
 
   const displayFileName = filename || fileId || 'document.pdf';
   const knownTotalPages = progress.totalPages || result?.totalPages || initialTotalPages || 0;
@@ -300,7 +332,9 @@ function TranslatePageContent() {
         }
 
         const blob = await response.blob();
-        objectUrl = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }));
+        const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
+        objectUrl = URL.createObjectURL(pdfBlob);
+        setPreviewBlob(pdfBlob);
         setPreviewObjectUrl((current) => {
           if (current) {
             URL.revokeObjectURL(current);
@@ -308,6 +342,7 @@ function TranslatePageContent() {
           return objectUrl;
         });
       } catch (previewLoadError) {
+        setPreviewBlob(null);
         setPreviewError(
           previewLoadError instanceof Error
             ? previewLoadError.message
@@ -439,6 +474,24 @@ function TranslatePageContent() {
   }, [previewObjectUrl]);
 
   useEffect(() => {
+    if (!previewObjectUrl) {
+      setPreviewBlob(null);
+    }
+  }, [previewObjectUrl]);
+
+  useEffect(() => {
+    if (!downloadToast || downloadToast.type === 'loading') {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setDownloadToast(null);
+    }, 2600);
+
+    return () => window.clearTimeout(timer);
+  }, [downloadToast]);
+
+  useEffect(() => {
     if (!fileId) {
       router.push('/');
     }
@@ -488,10 +541,18 @@ function TranslatePageContent() {
       return;
     }
 
+    setIsDownloadOpen(false);
     setDownloadingType(type);
+    setDownloadToast({
+      type: 'loading',
+      message: type === 'bilingual' ? 'Preparing bilingual PDF...' : 'Preparing translation-only PDF...',
+    });
     try {
       const token = await getToken({ skipCache: true });
-      const blob = await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
+      const blob =
+        type === 'bilingual' && previewBlob
+          ? previewBlob
+          : await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
       const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
       const objectUrl = URL.createObjectURL(pdfBlob);
       const link = document.createElement('a');
@@ -501,9 +562,15 @@ function TranslatePageContent() {
       link.click();
       link.remove();
       URL.revokeObjectURL(objectUrl);
-      setIsDownloadOpen(false);
+      setDownloadToast({
+        type: 'success',
+        message: 'Download started.',
+      });
     } catch (downloadError) {
-      setError(downloadError instanceof Error ? downloadError.message : 'Failed to download file.');
+      setDownloadToast({
+        type: 'error',
+        message: downloadError instanceof Error ? downloadError.message : 'Failed to download file.',
+      });
     } finally {
       setDownloadingType(null);
     }
@@ -586,14 +653,29 @@ function TranslatePageContent() {
 
           <div className="flex min-w-[112px] justify-end">
             {isPreviewReady ? (
-              <button
-                type="button"
-                onClick={() => setIsDownloadOpen(true)}
-                className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
-              >
-                <Download className="size-4" strokeWidth={2} />
-                Download
-              </button>
+              <div className="flex items-center gap-2">
+                <div className="group relative">
+                  <button
+                    type="button"
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+                    aria-label="Download help"
+                  >
+                    <Info className="size-4" strokeWidth={2} />
+                  </button>
+                  <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 w-[320px] rounded-xl border border-slate-200 bg-white p-3 text-left text-[12px] leading-5 text-slate-600 opacity-0 shadow-xl transition-opacity duration-150 group-hover:opacity-100">
+                    Tip: Use the editor&apos;s Save button to keep any annotations. The Download button exports the translated file only.
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsDownloadOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
+                >
+                  <Download className="size-4" strokeWidth={2} />
+                  Download
+                </button>
+              </div>
             ) : null}
           </div>
         </div>
@@ -710,11 +792,11 @@ function TranslatePageContent() {
 
       <DownloadModal
         open={isDownloadOpen}
-        downloadingType={downloadingType}
         filename={displayFileName}
         onClose={() => setIsDownloadOpen(false)}
         onDownload={handleDownload}
       />
+      <DownloadToast toast={downloadToast} />
     </div>
   );
 }

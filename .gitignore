@@ -42,3 +42,7 @@ npm-debug.log*
 .env
 .env.local
 .env.*.local
+
+#other
+design/
+docs/

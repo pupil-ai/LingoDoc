@@ -7,15 +7,18 @@ import { Loader2, Upload } from 'lucide-react';
 interface FileUploaderProps {
   onFileUpload: (file: File) => void | Promise<void>;
   disabled?: boolean;
+  keepLoadingOnSuccess?: boolean;
 }
 
-export function FileUploader({ onFileUpload, disabled = false }: FileUploaderProps) {
+export function FileUploader({ onFileUpload, disabled = false, keepLoadingOnSuccess = false }: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
   const handleFile = async (file: File) => {
+    let uploadSucceeded = false;
+
     if (disabled || isUploading) {
       return;
     }
@@ -29,8 +32,11 @@ export function FileUploader({ onFileUpload, disabled = false }: FileUploaderPro
     setIsUploading(true);
     try {
       await onFileUpload(file);
+      uploadSucceeded = true;
     } finally {
-      setIsUploading(false);
+      if (!uploadSucceeded || !keepLoadingOnSuccess) {
+        setIsUploading(false);
+      }
     }
   };
 
@@ -99,7 +105,7 @@ export function FileUploader({ onFileUpload, disabled = false }: FileUploaderPro
         <p className="mt-5 text-[20px] font-semibold tracking-[-0.03em] text-slate-900">
           {isUploading ? 'Uploading PDF...' : 'Drop a PDF file here'}
         </p>
-        <p className="mt-2 text-[14px] text-slate-500">
+        <p className="mt-2 text-[16px] text-slate-500">
           or <span className="font-medium text-emerald-600 transition-colors group-hover:text-emerald-700">browse files</span>
         </p>
 

@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { SignInButton, useAuth, useUser } from '@clerk/nextjs';
 import { Check, Mail, Sparkles, X } from 'lucide-react';
-import { Header } from '@/components/Header';
 
 declare global {
   interface Window {
@@ -78,10 +77,11 @@ const plans = [
     subtitle: 'Guest mode',
     monthlyPrice: 0,
     yearlyPrice: 0,
+    monthlyPages: 20,
     monthlyPriceId: '',
     yearlyPriceId: '',
     button: 'Get Started Free',
-    items: ['20 pages / month', 'Preview first 3 pages', 'PDF up to 25 MB'],
+    items: ['Core model', '20 pages / month', 'Preview first 3 pages', 'PDF up to 25 MB'],
     highlighted: false,
     badge: '',
   },
@@ -89,12 +89,13 @@ const plans = [
     key: 'starter',
     name: 'Starter',
     subtitle: 'For casual users',
-    monthlyPrice: 15,
-    yearlyPrice: 144,
+    monthlyPrice: 12,
+    yearlyPrice: 120,
+    monthlyPages: 100,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_YEARLY_PRICE_ID || '',
     button: 'Choose Starter',
-    items: ['100 pages / month', 'Up to 50 pages per PDF', 'PDF up to 50 MB', 'File history'],
+    items: ['Advanced model', '100 pages / month', 'Up to 50 pages per PDF', 'PDF up to 50 MB', 'File history'],
     highlighted: false,
     badge: '',
   },
@@ -102,12 +103,13 @@ const plans = [
     key: 'pro',
     name: 'Pro',
     subtitle: 'Recommended',
-    monthlyPrice: 50,
+    monthlyPrice: 48,
     yearlyPrice: 480,
+    monthlyPages: 500,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_YEARLY_PRICE_ID || '',
     button: 'Choose Pro',
-    items: ['500 pages / month', 'Up to 300 pages per PDF', 'PDF up to 100 MB', 'File history'],
+    items: ['Advanced model', '500 pages / month', 'Up to 300 pages per PDF', 'PDF up to 100 MB', 'File history'],
     highlighted: true,
     badge: 'Most popular',
   },
@@ -115,12 +117,14 @@ const plans = [
     key: 'power',
     name: 'Power',
     subtitle: 'Large scale',
-    monthlyPrice: 250,
+    monthlyPrice: 240,
     yearlyPrice: 2400,
+    monthlyPages: 3000,
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_POWER_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_POWER_YEARLY_PRICE_ID || '',
     button: 'Choose Power',
     items: [
+      'Advanced model',
       '3,000 pages / month',
       'Up to 3000 pages per PDF',
       'PDF up to 250 MB',
@@ -159,7 +163,13 @@ type PricingPreviewMap = Partial<Record<(typeof plans)[number]['key'], {
   monthlyLabel: string;
   yearlyMonthlyLabel: string;
   yearlyBilledLabel: string;
+  monthlyAmount: number;
+  yearlyMonthlyAmount: number;
 }>>;
+
+function formatPerPagePrice(value: number): string {
+  return `$${value.toFixed(2)} per page`;
+}
 
 const faqs = [
   {
@@ -183,7 +193,6 @@ const faqs = [
 function ClerkSetupRequired() {
   return (
     <div className="app-shell">
-      <Header />
       <section className="page-container py-24">
         <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
           <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
@@ -249,6 +258,7 @@ function PlanCard({
   isLoaded,
   isSignedIn,
   checkoutPlan,
+  isPriceLoading,
   previewPrice,
   onSelect,
 }: {
@@ -257,6 +267,7 @@ function PlanCard({
   isLoaded: boolean;
   isSignedIn: boolean;
   checkoutPlan: string;
+  isPriceLoading: boolean;
   previewPrice?: PricingPreviewMap[(typeof plans)[number]['key']];
   onSelect: (plan: (typeof plans)[number]) => void;
 }) {
@@ -264,10 +275,15 @@ function PlanCard({
     ? (previewPrice?.yearlyMonthlyLabel ?? formatMonthlyEquivalent(plan.yearlyPrice))
     : (previewPrice?.monthlyLabel ?? formatCurrency(plan.monthlyPrice));
   const billedYearlyLabel = previewPrice?.yearlyBilledLabel ?? `Billed ${formatCurrency(plan.yearlyPrice)}/year`;
+  const monthlyAmount = isYearly
+    ? (previewPrice?.yearlyMonthlyAmount ?? Math.round(plan.yearlyPrice / 12))
+    : (previewPrice?.monthlyAmount ?? plan.monthlyPrice);
+  const perPageLabel = formatPerPagePrice(monthlyAmount / plan.monthlyPages);
+  const showPriceSkeleton = isPriceLoading;
 
   return (
     <div
-      className={`relative rounded-2xl border bg-white p-6 transition-all hover:-translate-y-0.5 hover:shadow-md ${
+      className={`relative flex h-full flex-col rounded-2xl border bg-white p-6 transition-all hover:-translate-y-0.5 hover:shadow-md ${
         plan.highlighted ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-slate-200'
       }`}
     >
@@ -280,22 +296,47 @@ function PlanCard({
       <h2 className="text-[17px] font-bold text-slate-900">{plan.name}</h2>
       <p className="mt-1 text-[13px] text-slate-500">{plan.subtitle}</p>
 
-      <div className="mt-5 flex items-end gap-1">
-        <span className="text-[56px] font-bold leading-none tracking-[-0.05em] text-slate-900">
-          {displayPrice}
-        </span>
-        {plan.key !== 'free' && <span className="pb-1 text-[14px] text-slate-500">/month</span>}
+      <div className="mt-5 min-h-[86px]">
+        {showPriceSkeleton ? (
+          <div className="space-y-3">
+            <div className="h-12 w-[128px] animate-pulse rounded-md bg-slate-100" />
+            <div className="h-4 w-[96px] animate-pulse rounded-md bg-slate-100" />
+            <div className="h-4 w-[82px] animate-pulse rounded-md bg-slate-100" />
+          </div>
+        ) : (
+          <>
+            <div className="flex items-end gap-1">
+              <span className="text-[56px] font-bold leading-none tracking-[-0.05em] text-slate-900">
+                {displayPrice}
+              </span>
+              {plan.key !== 'free' && <span className="pb-1 text-[14px] text-slate-500">/month</span>}
+            </div>
+
+            <p className="mt-2 text-[13px] font-semibold text-emerald-600">
+              {perPageLabel}
+            </p>
+
+            {plan.key !== 'free' && isYearly ? (
+              <p className="mt-1 text-[13px] font-medium text-slate-500">
+                {billedYearlyLabel}
+              </p>
+            ) : null}
+          </>
+        )}
       </div>
 
-      {plan.key !== 'free' && isYearly && (
-        <p className="mt-2 text-[13px] font-semibold text-emerald-600">
-          {billedYearlyLabel}
-        </p>
-      )}
+      <ul className="mt-6 flex-1 space-y-3">
+        {plan.items.map((item) => (
+          <li key={item} className="flex items-start gap-3 text-[14px] leading-6 text-slate-600">
+            <Check className="mt-0.5 size-4 shrink-0 text-emerald-600" strokeWidth={2} />
+            <span>{item}</span>
+          </li>
+        ))}
+      </ul>
 
       {plan.key !== 'free' && isLoaded && !isSignedIn ? (
         <SignInButton mode="modal">
-          <button className={`mt-6 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all ${
+          <button className={`mt-8 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all ${
             plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
           }`}>
             Sign in to choose
@@ -306,22 +347,13 @@ function PlanCard({
           type="button"
           onClick={() => onSelect(plan)}
           disabled={checkoutPlan === plan.key}
-          className={`mt-6 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all disabled:cursor-wait disabled:opacity-70 ${
+          className={`mt-8 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all disabled:cursor-wait disabled:opacity-70 ${
             plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
           }`}
         >
           {checkoutPlan === plan.key ? 'Opening checkout...' : plan.button}
         </button>
       )}
-
-      <ul className="mt-6 space-y-3">
-        {plan.items.map((item) => (
-          <li key={item} className="flex items-start gap-3 text-[14px] leading-6 text-slate-600">
-            <Check className="mt-0.5 size-4 shrink-0 text-emerald-600" strokeWidth={2} />
-            <span>{item}</span>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
@@ -332,6 +364,7 @@ function PricingPageContent() {
   const [checkoutPlan, setCheckoutPlan] = useState('');
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [previewPrices, setPreviewPrices] = useState<PricingPreviewMap>({});
+  const [isPreviewPricesLoading, setIsPreviewPricesLoading] = useState(Boolean(PADDLE_CLIENT_TOKEN));
   const paddleInitializedRef = useRef(false);
   const { isLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
@@ -356,14 +389,17 @@ function PricingPageContent() {
   useEffect(() => {
     async function loadPreviewPrices() {
       if (!PADDLE_CLIENT_TOKEN) {
+        setIsPreviewPricesLoading(false);
         return;
       }
 
       const paidPlans = plans.filter((plan) => plan.key !== 'free');
+      setIsPreviewPricesLoading(true);
 
       try {
         const paddle = await initializePaddle();
         if (!paddle.PricePreview) {
+          setIsPreviewPricesLoading(false);
           return;
         }
 
@@ -414,12 +450,16 @@ function PricingPageContent() {
             yearlyBilledLabel: yearlyAmountMajor > 0
               ? `Billed ${formatCurrencyByCode(Math.round(yearlyAmountMajor), yearlyCurrencyCode)}/year`
               : `Billed ${formatCurrency(plan.yearlyPrice)}/year`,
+            monthlyAmount: monthlyAmountMajor > 0 ? Math.round(monthlyAmountMajor) : plan.monthlyPrice,
+            yearlyMonthlyAmount: yearlyAmountMajor > 0 ? Math.round(yearlyAmountMajor / 12) : Math.round(plan.yearlyPrice / 12),
           };
         }
 
         setPreviewPrices(nextPreviewPrices);
       } catch (error) {
         console.error('Failed to load Paddle preview prices:', error);
+      } finally {
+        setIsPreviewPricesLoading(false);
       }
     }
 
@@ -473,11 +513,9 @@ function PricingPageContent() {
 
   return (
     <div className="app-shell">
-      <Header />
-
       <main className="page-container pb-16 pt-10 sm:pb-24 sm:pt-14">
         <section className="text-center">
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[12px] font-semibold text-emerald-600">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[14px] font-semibold text-emerald-600">
             <Sparkles className="size-3" strokeWidth={2} />
             Simple, transparent pricing
           </span>
@@ -524,6 +562,7 @@ function PricingPageContent() {
               isLoaded={isLoaded}
               isSignedIn={Boolean(isSignedIn)}
               checkoutPlan={checkoutPlan}
+              isPriceLoading={isPreviewPricesLoading}
               previewPrice={previewPrices[plan.key]}
               onSelect={handleCheckout}
             />

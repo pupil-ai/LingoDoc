@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { AlertCircle, CheckCircle2, FileText, Loader2, Search, Trash2, Upload, X } from 'lucide-react';
-import { Header } from '@/components/Header';
 import { deleteMyFile, getMyFiles } from '@/lib/api';
 import type { MyFileRecord } from '@/types';
 
@@ -13,7 +12,6 @@ const PAGE_SIZE = 10;
 function ClerkSetupRequired() {
   return (
     <div className="app-shell">
-      <Header />
       <section className="page-container py-24">
         <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
           <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
@@ -326,7 +324,6 @@ function DashboardContent() {
   if (isLoaded && !isSignedIn) {
     return (
       <div className="app-shell">
-        <Header />
         <section className="page-container py-24">
           <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
             <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Sign in required</h1>
@@ -344,8 +341,6 @@ function DashboardContent() {
 
   return (
     <div className="app-shell">
-      <Header />
-
       <main className="page-container pb-14 pt-10 sm:pb-20 sm:pt-14">
         <h1 className="text-[48px] font-bold tracking-[-0.03em] text-slate-900">My Files</h1>
         <p className="mt-2 text-[17px] text-slate-600">Access and manage your translated documents</p>

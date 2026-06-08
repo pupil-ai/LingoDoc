@@ -4,7 +4,6 @@ import { useEffect, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, ArrowLeftRight, Check, FileText, ShieldCheck, Sparkles } from 'lucide-react';
-import { Header } from '@/components/Header';
 import { FileUploader } from '@/components/FileUploader';
 import { uploadFile } from '@/lib/api';
 
@@ -14,7 +13,6 @@ const SESSION_EXPIRED_ERROR = 'Your login session has expired. Please sign in ag
 function ClerkSetupRequired() {
   return (
     <div className="app-shell">
-      <Header />
       <section className="page-container py-24">
         <div className="mx-auto max-w-[560px] rounded-2xl border border-slate-200 bg-white p-10 text-center shadow-[var(--shadow-card)]">
           <h1 className="text-[40px] font-bold tracking-[-0.05em] text-slate-900">Clerk setup required</h1>
@@ -92,6 +90,10 @@ function HomeContent() {
     }
   }, [error, isSignedIn]);
 
+  useEffect(() => {
+    router.prefetch('/translate');
+  }, [router]);
+
   const handleFileUpload = async (file: File) => {
     if (!isLoaded) {
       setError('Please wait while your account finishes loading.');
@@ -129,11 +131,9 @@ function HomeContent() {
 
   return (
     <div className="app-shell">
-      <Header />
-
       <main>
         <section className="page-container flex flex-col items-center pb-20 pt-8 text-center sm:pb-28 sm:pt-14">
-          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[12px] font-semibold text-emerald-600">
+          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[14px] font-semibold text-emerald-600">
             <Sparkles className="size-3" strokeWidth={2} />
             Powered by Advanced AI
           </span>
@@ -150,7 +150,7 @@ function HomeContent() {
           </p>
 
           <div className="mt-12 w-full max-w-[860px]">
-            <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded} />
+            <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded} keepLoadingOnSuccess />
             <p className="mt-4 text-center text-[12px] font-medium text-slate-400">Supports large PDF files</p>
             {error && <p className="mt-4 text-center text-sm font-semibold text-red-600">{error}</p>}
             {!isSignedIn && isLoaded && (
