@@ -307,6 +307,8 @@ function DashboardContent() {
     router.push(`/translate?${params.toString()}`);
   };
 
+  const isFileNavigable = (file: MyFileRecord) => file.status !== 'error';
+
   const handleDelete = async () => {
     if (!fileToDelete) {
       return;
@@ -408,14 +410,17 @@ function DashboardContent() {
           ) : (
             <div className="space-y-3">
               {paginatedFiles.map((file) => (
+                (() => {
+                  const isNavigable = isFileNavigable(file);
+                  const rowClassName = isNavigable
+                    ? 'group flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 transition-all hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'
+                    : 'group flex items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 transition-all';
+
+                  return (
                 <div
                   key={file.id}
-                  className={`group flex cursor-pointer items-center justify-between gap-4 rounded-2xl border border-slate-200 bg-white px-4 py-4 transition-all ${
-                    file.status === 'completed'
-                      ? 'hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md'
-                      : 'hover:border-slate-300 hover:bg-slate-50/40'
-                  }`}
-                  onClick={() => openFile(file)}
+                  className={rowClassName}
+                  onClick={isNavigable ? () => openFile(file) : undefined}
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-4">
                     <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-700 text-white">
@@ -453,6 +458,8 @@ function DashboardContent() {
                     </button>
                   </div>
                 </div>
+                  );
+                })()
               ))}
             </div>
           )}
