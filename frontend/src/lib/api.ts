@@ -99,9 +99,10 @@ export async function getTranslationProgress(
 
 export async function getTranslationResult(
   taskId: string,
+  includePages = true,
   token?: string | null
 ): Promise<TranslationResult> {
-  const response = await fetch(buildUrl(`/api/translate/${taskId}/result`), {
+  const response = await fetch(buildUrl(`/api/translate/${taskId}/result?include_pages=${includePages}`), {
     headers: buildAuthHeaders(token),
   });
   return parseJsonResponse<TranslationResult>(response, 'Failed to get translation result');

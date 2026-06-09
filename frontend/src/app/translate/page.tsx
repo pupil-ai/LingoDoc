@@ -469,7 +469,7 @@ function TranslatePageContent() {
         pollErrorCountRef.current = 0;
         setError('');
         setIsPreparingPreview(true);
-        const resultData = await getTranslationResult(taskId, token);
+        const resultData = await getTranslationResult(taskId, false, token);
         setResult(resultData);
         setIsPreparingPreview(false);
         await loadPreview(taskId);
@@ -589,7 +589,7 @@ function TranslatePageContent() {
 
         if (progressData.status === 'completed') {
           setTaskId(initialTaskId);
-          const resultData = await getTranslationResult(initialTaskId, token);
+          const resultData = await getTranslationResult(initialTaskId, false, token);
           setResult(resultData);
           await loadPreview(initialTaskId);
         } else if (progressData.status === 'processing') {

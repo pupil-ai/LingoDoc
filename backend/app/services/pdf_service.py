@@ -15,6 +15,8 @@ class PDFService:
         os.makedirs(self.upload_dir, exist_ok=True)
         os.makedirs(self.output_dir, exist_ok=True)
 
+    PREVIEW_VISUAL_LAYER_SCALE = 1.25
+
     def get_file_storage_key(self, file_id: str) -> str:
         return f"uploads/{file_id}.pdf"
 
@@ -845,7 +847,12 @@ class PDFService:
 
     def _insert_source_page_visual_layer(self, target_page, source_page, target_rect: fitz.Rect):
         try:
-            pixmap = source_page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            # Keep the translation-side background crisp enough for reading while
+            # avoiding the very large PDFs caused by 2x full-page rasterization.
+            pixmap = source_page.get_pixmap(
+                matrix=fitz.Matrix(self.PREVIEW_VISUAL_LAYER_SCALE, self.PREVIEW_VISUAL_LAYER_SCALE),
+                alpha=False,
+            )
             target_page.insert_image(target_rect, stream=pixmap.tobytes("png"))
             return
         except Exception as e:

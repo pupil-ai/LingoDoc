@@ -49,12 +49,15 @@ export interface PageResult {
 
 export interface TranslationResult {
   success: boolean;
-  pages: PageResult[];
+  pages?: PageResult[];
+  fileId?: string;
   totalPages?: number;
   translatedPages?: number;
   isPartial?: boolean;
   plan?: string;
   pageLimit?: number;
+  usageMonth?: string;
+  monthlyPageQuota?: number;
 }
 
 export interface MyFileRecord {

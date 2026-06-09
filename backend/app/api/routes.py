@@ -1149,7 +1149,11 @@ async def get_progress(task_id: str, current_user: CurrentUser = Depends(get_cur
     return JSONResponse(progress)
 
 @router.get("/api/translate/{task_id}/result")
-async def get_result(task_id: str, current_user: CurrentUser = Depends(get_current_user)):
+async def get_result(
+    task_id: str,
+    include_pages: bool = True,
+    current_user: CurrentUser = Depends(get_current_user),
+):
     _ensure_task_owner(task_id, current_user.id)
 
     try:
@@ -1157,6 +1161,8 @@ async def get_result(task_id: str, current_user: CurrentUser = Depends(get_curre
         if result.get("userId") != current_user.id:
             _raise_not_found()
         response_result = {key: value for key, value in result.items() if key != "userId"}
+        if not include_pages:
+            response_result.pop("pages", None)
         return JSONResponse({
             "success": True,
             **response_result,
