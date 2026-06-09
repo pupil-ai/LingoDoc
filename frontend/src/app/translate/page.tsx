@@ -9,6 +9,7 @@ import { LanguageSelector } from '@/components/LanguageSelector';
 import { ProgressBar } from '@/components/ProgressBar';
 import {
   exportTranslation,
+  fetchExportPdfBlob,
   getMyUsage,
   getOriginalFilePreviewBlob,
   getTranslationProgress,
@@ -358,15 +359,11 @@ function TranslatePageContent() {
 
       try {
         const token = await getToken({ skipCache: true });
-        const response = await fetch(`/api/export/${activeTaskId}?format=pdf&output_type=bilingual&v=${previewVersion}`, {
-          cache: 'no-store',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-        if (!response.ok) {
-          throw new Error('Failed to load preview');
-        }
-
-        const blob = await response.blob();
+        const blob = await fetchExportPdfBlob(
+          activeTaskId,
+          `format=pdf&output_type=bilingual&v=${previewVersion}`,
+          token
+        );
         const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
         objectUrl = URL.createObjectURL(pdfBlob);
         setPreviewBlob(pdfBlob);

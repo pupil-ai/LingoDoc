@@ -86,6 +86,22 @@ class DatabaseService:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS translation_task_pages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    page_number INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    is_billed INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(id) ON DELETE CASCADE,
+                    UNIQUE(task_id, page_number)
+                );
+
                 CREATE TABLE IF NOT EXISTS usage_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL UNIQUE,
@@ -100,6 +116,21 @@ class DatabaseService:
                     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS usage_page_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    file_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    plan TEXT NOT NULL,
+                    page_number INTEGER NOT NULL,
+                    usage_month TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES translation_tasks(id) ON DELETE CASCADE,
+                    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    UNIQUE(task_id, page_number)
+                );
+
                 CREATE TABLE IF NOT EXISTS paddle_webhook_events (
                     id TEXT PRIMARY KEY,
                     event_type TEXT NOT NULL,
@@ -109,10 +140,13 @@ class DatabaseService:
                 CREATE INDEX IF NOT EXISTS idx_files_user_id ON files(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_user_id ON translation_tasks(user_id);
                 CREATE INDEX IF NOT EXISTS idx_translation_tasks_file_id ON translation_tasks(file_id);
+                CREATE INDEX IF NOT EXISTS idx_translation_task_pages_task_id ON translation_task_pages(task_id);
                 CREATE INDEX IF NOT EXISTS idx_exports_task_id ON exports(task_id);
                 CREATE INDEX IF NOT EXISTS idx_exports_user_id ON exports(user_id);
                 CREATE INDEX IF NOT EXISTS idx_usage_events_user_month ON usage_events(user_id, usage_month);
                 CREATE INDEX IF NOT EXISTS idx_usage_events_task_id ON usage_events(task_id);
+                CREATE INDEX IF NOT EXISTS idx_usage_page_events_user_month ON usage_page_events(user_id, usage_month);
+                CREATE INDEX IF NOT EXISTS idx_usage_page_events_task_id ON usage_page_events(task_id);
                 """
             )
             self._ensure_column(connection, "users", "plan", "TEXT NOT NULL DEFAULT 'free'")
@@ -346,6 +380,31 @@ class DatabaseService:
             ).fetchone()
         return dict(row) if row else None
 
+    def find_resumable_translation_task(
+        self,
+        *,
+        file_id: str,
+        user_id: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> Optional[Dict[str, Any]]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM translation_tasks
+                WHERE file_id = ?
+                  AND user_id = ?
+                  AND source_lang = ?
+                  AND target_lang = ?
+                  AND status IN ('queued', 'processing', 'recoverable')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (file_id, user_id, source_lang, target_lang),
+            ).fetchone()
+        return dict(row) if row else None
+
     def list_file_task_ids(self, file_id: str) -> list[str]:
         with self._connect() as connection:
             rows = connection.execute(
@@ -362,11 +421,12 @@ class DatabaseService:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT COALESCE(SUM(pages), 0) AS used_pages
-                FROM usage_events
-                WHERE user_id = ? AND usage_month = ?
+                SELECT (
+                    COALESCE((SELECT SUM(pages) FROM usage_events WHERE user_id = ? AND usage_month = ?), 0) +
+                    COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE user_id = ? AND usage_month = ?), 0)
+                ) AS used_pages
                 """,
-                (user_id, month),
+                (user_id, month, user_id, month),
             ).fetchone()
 
         return int(row["used_pages"] or 0) if row else 0
@@ -397,6 +457,130 @@ class DatabaseService:
                 """,
                 (task_id, file_id, user_id, plan, pages, month, now),
             )
+
+    def create_task_pages(self, task_id: str, total_pages: int) -> None:
+        if total_pages <= 0:
+            return
+
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO translation_task_pages (
+                    task_id, page_number, status, retry_count, is_billed, created_at, updated_at
+                )
+                VALUES (?, ?, 'pending', 0, 0, ?, ?)
+                """,
+                [(task_id, page_number + 1, now, now) for page_number in range(total_pages)],
+            )
+
+    def list_task_pages(self, task_id: str) -> list[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM translation_task_pages
+                WHERE task_id = ?
+                ORDER BY page_number ASC
+                """,
+                (task_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def reset_processing_task_pages(self, task_id: str) -> None:
+        now = _utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE translation_task_pages
+                SET status = 'pending', updated_at = ?, started_at = NULL
+                WHERE task_id = ? AND status = 'processing'
+                """,
+                (now, task_id),
+            )
+
+    def update_task_page(
+        self,
+        task_id: str,
+        page_number: int,
+        *,
+        status: Optional[str] = None,
+        retry_count: Optional[int] = None,
+        last_error: Optional[str] = None,
+        is_billed: Optional[bool] = None,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+    ) -> None:
+        updates = ["updated_at = ?"]
+        values: list[Any] = [_utc_now()]
+
+        if status is not None:
+            updates.append("status = ?")
+            values.append(status)
+        if retry_count is not None:
+            updates.append("retry_count = ?")
+            values.append(retry_count)
+        if last_error is not None:
+            updates.append("last_error = ?")
+            values.append(last_error)
+        if is_billed is not None:
+            updates.append("is_billed = ?")
+            values.append(1 if is_billed else 0)
+        if started_at is not None:
+            updates.append("started_at = ?")
+            values.append(started_at)
+        if completed_at is not None:
+            updates.append("completed_at = ?")
+            values.append(completed_at)
+
+        values.extend([task_id, page_number])
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE translation_task_pages SET {', '.join(updates)} WHERE task_id = ? AND page_number = ?",
+                values,
+            )
+
+    def get_task_page_counts(self, task_id: str) -> Dict[str, int]:
+        counts = {"pending": 0, "processing": 0, "completed": 0, "failed": 0}
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS count
+                FROM translation_task_pages
+                WHERE task_id = ?
+                GROUP BY status
+                """,
+                (task_id,),
+            ).fetchall()
+        for row in rows:
+            status = str(row["status"])
+            counts[status] = int(row["count"])
+        return counts
+
+    def record_page_usage_event(
+        self,
+        *,
+        task_id: str,
+        file_id: str,
+        user_id: str,
+        plan: str,
+        page_number: int,
+        usage_month: Optional[str] = None,
+    ) -> bool:
+        month = usage_month or self.get_current_usage_month()
+        now = _utc_now()
+
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO usage_page_events (
+                    task_id, file_id, user_id, plan, page_number, usage_month, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, file_id, user_id, plan, page_number, month, now),
+            )
+        return cursor.rowcount > 0
 
     def list_user_files(self, user_id: str) -> list[Dict[str, Any]]:
         with self._connect() as connection:

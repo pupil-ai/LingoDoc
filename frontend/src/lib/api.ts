@@ -11,8 +11,25 @@ import type {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || '';
 
-function buildUrl(path: string): string {
-  return `${API_BASE_URL}${path}`;
+function resolveApiBaseUrl(): string {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  if (typeof window === 'undefined') {
+    return '';
+  }
+
+  const { hostname, protocol } = window.location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return `${protocol}//${hostname}:8000`;
+  }
+
+  return '';
+}
+
+export function buildUrl(path: string): string {
+  return `${resolveApiBaseUrl()}${path}`;
 }
 
 function buildAuthHeaders(token?: string | null): HeadersInit {
@@ -20,7 +37,20 @@ function buildAuthHeaders(token?: string | null): HeadersInit {
 }
 
 async function parseJsonResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
-  const data = await response.json();
+  const rawText = await response.text();
+  let data: any = null;
+
+  if (rawText) {
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      if (!response.ok) {
+        throw new Error(rawText || fallbackMessage);
+      }
+      throw new Error(fallbackMessage);
+    }
+  }
+
   if (!response.ok) {
     throw new Error(data?.detail || fallbackMessage);
   }
@@ -89,13 +119,38 @@ export async function exportTranslation(
         ? 'format=pdf&output_type=translated&download=true'
         : 'format=text';
 
-  const response = await fetch(
-    buildUrl(`/api/export/${taskId}?${params}&v=${Date.now()}`),
-    {
-      cache: 'no-store',
-      headers: buildAuthHeaders(token),
-    }
-  );
+  const response = await fetch(buildExportUrl(taskId, `${params}&v=${Date.now()}`), {
+    cache: 'no-store',
+    headers: buildAuthHeaders(token),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || 'Failed to export file');
+  }
+
+  return response.blob();
+}
+
+export function buildExportUrl(taskId: string, params: string): string {
+  return buildUrl(`/api/export/${taskId}?${params}`);
+}
+
+export async function fetchExportPdfBlob(
+  taskId: string,
+  params: string,
+  token?: string | null
+): Promise<Blob> {
+  const response = await fetch(buildExportUrl(taskId, params), {
+    cache: 'no-store',
+    headers: buildAuthHeaders(token),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(errorText || 'Failed to load PDF');
+  }
+
   return response.blob();
 }
 

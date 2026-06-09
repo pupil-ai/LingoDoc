@@ -26,6 +26,11 @@ router = APIRouter()
 
 pdf_service = PDFService()
 translation_tasks: Dict[str, Dict[str, Any]] = {}
+TRANSLATION_BATCH_MAX_BLOCKS = 12
+TRANSLATION_BATCH_MAX_CHARS = 5000
+TRANSLATION_BATCH_CONCURRENCY = 2
+PAGE_TRANSLATION_CONCURRENCY = 3
+PAGE_RETRY_LIMIT = 2
 
 class TranslationRequest(BaseModel):
     fileId: str
@@ -226,6 +231,295 @@ def _build_page_translated_text(translated_blocks: list[Dict[str, Any]]) -> str:
     return "\n".join(translated_parts)
 
 
+def _chunk_translatable_blocks(blocks: list[Dict[str, Any]]) -> list[list[tuple[int, Dict[str, Any]]]]:
+    batches: list[list[tuple[int, Dict[str, Any]]]] = []
+    current_batch: list[tuple[int, Dict[str, Any]]] = []
+    current_chars = 0
+
+    for index, block in enumerate(blocks):
+        if (
+            block.get("type") != "text"
+            or block.get("is_header_footer_metadata")
+            or not pdf_service.is_translatable_text_block(block)
+        ):
+            continue
+
+        block_text = str(block.get("text") or "")
+        if not block_text.strip():
+            continue
+
+        should_flush = (
+            current_batch
+            and (
+                len(current_batch) >= TRANSLATION_BATCH_MAX_BLOCKS
+                or current_chars + len(block_text) > TRANSLATION_BATCH_MAX_CHARS
+            )
+        )
+        if should_flush:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = 0
+
+        current_batch.append((index, block))
+        current_chars += len(block_text)
+
+    if current_batch:
+        batches.append(current_batch)
+
+    return batches
+
+
+async def _translate_batch_with_fallback(
+    translator: Any,
+    batch: list[tuple[int, Dict[str, Any]]],
+    source_lang: str,
+    target_lang: str,
+    *,
+    page_number: Optional[int] = None,
+    batch_number: Optional[int] = None,
+) -> Dict[int, str]:
+    texts = [str(block.get("text") or "") for _, block in batch]
+    started_at = time.perf_counter()
+    try:
+        translations = await translator.translate_batch(texts, source_lang, target_lang)
+        if len(translations) != len(batch):
+            raise ValueError("Batch translation count mismatch")
+        safe_print(
+            "[PERF] Batch translated: "
+            f"page={page_number or '?'} batch={batch_number or '?'} "
+            f"blocks={len(batch)} chars={sum(len(text) for text in texts)} "
+            f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.0f}"
+        )
+        return {
+            batch[index][0]: translations[index]
+            for index in range(len(batch))
+        }
+    except Exception as batch_error:
+        safe_print(
+            "[DEBUG] Batch translation fallback triggered: "
+            f"page={page_number or '?'} batch={batch_number or '?'} error={batch_error}"
+        )
+        translated: Dict[int, str] = {}
+        for block_index, block in batch:
+            translated[block_index] = await translator.translate(
+                str(block.get("text") or ""),
+                source_lang,
+                target_lang,
+            )
+        safe_print(
+            "[PERF] Batch fallback translated: "
+            f"page={page_number or '?'} batch={batch_number or '?'} "
+            f"blocks={len(batch)} chars={sum(len(text) for text in texts)} "
+            f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.0f}"
+        )
+        return translated
+
+
+async def _translate_page_blocks(
+    translator: Any,
+    text_blocks: list[Dict[str, Any]],
+    source_lang: str,
+    target_lang: str,
+    *,
+    page_number: Optional[int] = None,
+) -> list[Dict[str, Any]]:
+    translated_blocks = [dict(block) for block in text_blocks]
+    batches = _chunk_translatable_blocks(translated_blocks)
+    if not batches:
+        for block in translated_blocks:
+            block.setdefault("translatedText", "")
+        return translated_blocks
+
+    semaphore = asyncio.Semaphore(TRANSLATION_BATCH_CONCURRENCY)
+
+    async def run_batch(batch_index: int, batch: list[tuple[int, Dict[str, Any]]]) -> Dict[int, str]:
+        async with semaphore:
+            return await _translate_batch_with_fallback(
+                translator,
+                batch,
+                source_lang,
+                target_lang,
+                page_number=page_number,
+                batch_number=batch_index + 1,
+            )
+
+    batch_results = await asyncio.gather(*(run_batch(index, batch) for index, batch in enumerate(batches)))
+    translated_text_by_index: Dict[int, str] = {}
+    for batch_result in batch_results:
+        translated_text_by_index.update(batch_result)
+
+    for index, block in enumerate(translated_blocks):
+        if block.get("type") == "image":
+            block["translatedText"] = ""
+        elif not pdf_service.is_translatable_text_block(block):
+            block["translatedText"] = ""
+            block["is_formula"] = True
+        elif block.get("is_header_footer_metadata"):
+            block["translatedText"] = ""
+        else:
+            block["translatedText"] = translated_text_by_index.get(index, str(block.get("text") or ""))
+            block["is_formula"] = False
+
+    return translated_blocks
+
+
+def _build_page_result(page_num: int, full_text: str, translated_blocks: list[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "pageNum": page_num + 1,
+        "original": full_text,
+        "translated": _build_page_translated_text(translated_blocks),
+        "textBlocks": translated_blocks,
+    }
+
+
+def _update_task_runtime_state(
+    task_id: str,
+    *,
+    status: str,
+    progress: float,
+    processed_pages: int,
+    total_pages: int,
+    requested_pages: int,
+    translated_pages: int,
+    is_partial: bool,
+    error: Optional[str] = None,
+) -> None:
+    current = translation_tasks.setdefault(task_id, {})
+    current.update({
+        "status": status,
+        "progress": progress,
+        "processedPages": processed_pages,
+        "totalPages": total_pages,
+        "requestedPages": requested_pages,
+        "translatedPages": translated_pages,
+        "isPartial": is_partial,
+    })
+    if error:
+        current["error"] = error
+    elif "error" in current:
+        current.pop("error")
+
+
+def _sync_task_progress(task_id: str, *, total_pages: int, requested_pages: int, is_partial: bool, status: str) -> Dict[str, int]:
+    counts = db_service.get_task_page_counts(task_id)
+    translated_pages = counts.get("completed", 0)
+    processed_pages = translated_pages + counts.get("failed", 0)
+    progress = (translated_pages / max(requested_pages, 1)) * 100
+    db_service.update_translation_task(
+        task_id,
+        status=status,
+        progress=progress,
+        processed_pages=processed_pages,
+        translated_pages=translated_pages,
+        total_pages=total_pages,
+        requested_pages=requested_pages,
+        is_partial=is_partial,
+        error=None,
+    )
+    _update_task_runtime_state(
+        task_id,
+        status=status,
+        progress=progress,
+        processed_pages=processed_pages,
+        total_pages=total_pages,
+        requested_pages=requested_pages,
+        translated_pages=translated_pages,
+        is_partial=is_partial,
+    )
+    return counts
+
+
+async def _process_translation_page(
+    *,
+    task_id: str,
+    file_id: str,
+    page_number: int,
+    initial_retry_count: int,
+    translator: Any,
+    source_lang: str,
+    target_lang: str,
+    user_id: str,
+    plan_metadata: Dict[str, Any],
+) -> None:
+    attempts = initial_retry_count
+
+    while attempts <= PAGE_RETRY_LIMIT:
+        db_service.update_task_page(
+            task_id,
+            page_number,
+            status="processing",
+            retry_count=attempts,
+            last_error="",
+            started_at=str(time.time()),
+        )
+        page_started_at = time.perf_counter()
+        try:
+            extract_started_at = time.perf_counter()
+            page_content = pdf_service.extract_page_content(file_id, page_number - 1)
+            safe_print(
+                "[PERF] Page extracted: "
+                f"page={page_number} blocks={len(page_content['textBlocks'])} "
+                f"elapsed_ms={(time.perf_counter() - extract_started_at) * 1000:.0f}"
+            )
+            translated_blocks = await _translate_page_blocks(
+                translator,
+                page_content["textBlocks"],
+                source_lang,
+                target_lang,
+                page_number=page_number,
+            )
+            page_result = _build_page_result(
+                page_number - 1,
+                page_content["fullText"],
+                translated_blocks,
+            )
+            pdf_service.save_page_translation_result(task_id, page_number - 1, page_result)
+            db_service.update_task_page(
+                task_id,
+                page_number,
+                status="completed",
+                retry_count=attempts,
+                last_error="",
+                completed_at=str(time.time()),
+            )
+            if db_service.record_page_usage_event(
+                task_id=task_id,
+                file_id=file_id,
+                user_id=user_id,
+                plan=plan_metadata["plan"],
+                page_number=page_number,
+                usage_month=plan_metadata.get("usageMonth"),
+            ):
+                db_service.update_task_page(task_id, page_number, is_billed=True)
+
+            safe_print(
+                "[PERF] Page translated: "
+                f"page={page_number} elapsed_ms={(time.perf_counter() - page_started_at) * 1000:.0f}"
+            )
+            return
+        except Exception as page_error:
+            attempts += 1
+            safe_print(f"[DEBUG] Page {page_number} translation failed: {page_error}")
+            if attempts > PAGE_RETRY_LIMIT:
+                db_service.update_task_page(
+                    task_id,
+                    page_number,
+                    status="failed",
+                    retry_count=attempts,
+                    last_error=str(page_error),
+                )
+            else:
+                db_service.update_task_page(
+                    task_id,
+                    page_number,
+                    status="pending",
+                    retry_count=attempts,
+                    last_error=str(page_error),
+                )
+
+    safe_print(f"[DEBUG] Page {page_number} exhausted retries")
+
+
 def _ensure_file_owner(file_id: str, user_id: str) -> Dict[str, Any]:
     file_record = db_service.get_file(file_id)
     if not file_record or file_record.get("user_id") != user_id:
@@ -393,6 +687,10 @@ async def delete_my_file(file_id: str, current_user: CurrentUser = Depends(get_c
         pdf_service.get_output_storage_key(task_id)
         for task_id in task_ids
     )
+    for task_id in task_ids:
+        total_pages = int(file_record.get("total_pages") or 0)
+        for page_num in range(total_pages):
+            storage_keys_to_delete.append(pdf_service.get_output_page_storage_key(task_id, page_num))
 
     for storage_key in storage_keys_to_delete:
         if storage_key and storage_service.exists(storage_key):
@@ -417,7 +715,7 @@ async def get_my_usage(current_user: CurrentUser = Depends(get_current_user)):
     })
 
 
-async def translate_pdf_task(
+async def _legacy_translate_pdf_task_slow(
     task_id: str,
     file_id: str,
     source_lang: str,
@@ -581,6 +879,134 @@ async def translate_pdf_task(
             translation_tasks[task_id]["error"] = str(e)
         db_service.update_translation_task(task_id, status="error", error=str(e))
 
+
+async def translate_pdf_task(
+    task_id: str,
+    file_id: str,
+    source_lang: str,
+    target_lang: str,
+    user_id: str,
+    pages_to_translate: int,
+    plan_metadata: Dict[str, Any],
+):
+    try:
+        translation_tasks[task_id] = {"userId": user_id}
+        total_pages = pdf_service.get_total_pages(file_id)
+        pages_to_translate = min(pages_to_translate, total_pages)
+        is_partial = pages_to_translate < total_pages
+        _update_task_runtime_state(
+            task_id,
+            status="processing",
+            progress=0,
+            processed_pages=0,
+            total_pages=total_pages,
+            requested_pages=pages_to_translate,
+            translated_pages=0,
+            is_partial=is_partial,
+        )
+        translation_tasks[task_id]["plan"] = plan_metadata["plan"]
+        db_service.update_translation_task(
+            task_id,
+            status="processing",
+            total_pages=total_pages,
+            requested_pages=pages_to_translate,
+            translated_pages=0,
+            is_partial=is_partial,
+            error="",
+        )
+        db_service.create_task_pages(task_id, pages_to_translate)
+        db_service.reset_processing_task_pages(task_id)
+
+        translator = TranslationServiceFactory.get("ofoxai")
+        safe_print(f"[DEBUG] Translator type: {type(translator).__name__}")
+        pending_page_rows = [
+            page_row
+            for page_row in db_service.list_task_pages(task_id)
+            if int(page_row["page_number"]) <= pages_to_translate and page_row.get("status") != "completed"
+        ]
+        safe_print(
+            "[PERF] Translation task starting: "
+            f"task_id={task_id} pages={len(pending_page_rows)} "
+            f"page_concurrency={PAGE_TRANSLATION_CONCURRENCY} batch_concurrency={TRANSLATION_BATCH_CONCURRENCY}"
+        )
+
+        page_semaphore = asyncio.Semaphore(PAGE_TRANSLATION_CONCURRENCY)
+
+        async def run_page(page_row: Dict[str, Any]) -> None:
+            page_number = int(page_row["page_number"])
+            async with page_semaphore:
+                await _process_translation_page(
+                    task_id=task_id,
+                    file_id=file_id,
+                    page_number=page_number,
+                    initial_retry_count=int(page_row.get("retry_count") or 0),
+                    translator=translator,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    user_id=user_id,
+                    plan_metadata=plan_metadata,
+                )
+                _sync_task_progress(
+                    task_id,
+                    total_pages=total_pages,
+                    requested_pages=pages_to_translate,
+                    is_partial=is_partial,
+                    status="processing",
+                )
+
+        await asyncio.gather(*(run_page(page_row) for page_row in pending_page_rows))
+
+        counts = db_service.get_task_page_counts(task_id)
+        if counts.get("completed", 0) >= pages_to_translate:
+            page_results = pdf_service.load_page_translation_results(task_id)
+            result = {
+                "pages": sorted(page_results, key=lambda page: page.get("pageNum", 0)),
+                "fileId": file_id,
+                "userId": user_id,
+                "totalPages": total_pages,
+                "translatedPages": counts.get("completed", 0),
+                "isPartial": is_partial,
+                "plan": plan_metadata["plan"],
+                "pageLimit": plan_metadata["maxPagesPerFile"],
+                "usageMonth": plan_metadata.get("usageMonth"),
+                "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
+            }
+            pdf_service.save_translation_result(task_id, result)
+            db_service.update_translation_task(
+                task_id,
+                status="completed",
+                progress=100,
+                processed_pages=pages_to_translate,
+                translated_pages=pages_to_translate,
+                total_pages=total_pages,
+                requested_pages=pages_to_translate,
+                is_partial=is_partial,
+                error="",
+            )
+            _update_task_runtime_state(
+                task_id,
+                status="completed",
+                progress=100,
+                processed_pages=pages_to_translate,
+                total_pages=total_pages,
+                requested_pages=pages_to_translate,
+                translated_pages=pages_to_translate,
+                is_partial=is_partial,
+            )
+        else:
+            _sync_task_progress(
+                task_id,
+                total_pages=total_pages,
+                requested_pages=pages_to_translate,
+                is_partial=is_partial,
+                status="recoverable",
+            )
+    except Exception as e:
+        if task_id in translation_tasks:
+            translation_tasks[task_id]["status"] = "error"
+            translation_tasks[task_id]["error"] = str(e)
+        db_service.update_translation_task(task_id, status="error", error=str(e))
+
 @router.post("/api/translate")
 async def start_translation(
     request: TranslationRequest,
@@ -595,8 +1021,61 @@ async def start_translation(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="File not found")
 
+    resumable_task = db_service.find_resumable_translation_task(
+        file_id=request.fileId,
+        user_id=current_user.id,
+        source_lang=request.sourceLang,
+        target_lang=request.targetLang,
+    )
+    if resumable_task:
+        task_id = str(resumable_task["id"])
+        requested_pages = int(resumable_task.get("requested_pages") or total_pages)
+        counts = db_service.get_task_page_counts(task_id)
+        remaining_pages_to_run = max(requested_pages - counts.get("completed", 0), 0)
+        usage_summary = _get_usage_summary(current_user.id)
+        remaining_pages = usage_summary.get("remainingPages")
+        if remaining_pages is not None and remaining_pages_to_run > remaining_pages:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"This task still needs {remaining_pages_to_run} pages, but your "
+                    f"{usage_summary['plan']} plan has {remaining_pages} pages remaining for "
+                    f"{usage_summary['usageMonth']}."
+                ),
+            )
+
+        plan_metadata, _ = _get_user_plan_metadata(current_user.id)
+        plan_metadata.update({
+            "usageMonth": usage_summary.get("usageMonth"),
+            "monthlyPageQuota": usage_summary.get("monthlyPageQuota"),
+            "remainingPages": remaining_pages,
+        })
+        if task_id not in translation_tasks:
+            background_tasks.add_task(
+                translate_pdf_task,
+                task_id,
+                request.fileId,
+                request.sourceLang,
+                request.targetLang,
+                current_user.id,
+                requested_pages,
+                plan_metadata,
+            )
+
+        return JSONResponse({
+            "success": True,
+            "taskId": task_id,
+            "requestedPages": requested_pages,
+            "totalPages": total_pages,
+            "isPartial": requested_pages < total_pages,
+            "plan": plan_metadata["plan"],
+            "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
+            "remainingPages": plan_metadata.get("remainingPages"),
+            "resumed": True,
+        })
+
     pages_to_translate, plan_metadata = _authorize_translation_request(total_pages, current_user.id)
-    
+
     task_id = str(uuid.uuid4())
     db_service.create_translation_task(
         task_id=task_id,
@@ -615,7 +1094,7 @@ async def start_translation(
         pages_to_translate,
         plan_metadata,
     )
-    
+
     return JSONResponse({
         "success": True,
         "taskId": task_id,
@@ -625,6 +1104,7 @@ async def start_translation(
         "plan": plan_metadata["plan"],
         "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
         "remainingPages": plan_metadata.get("remainingPages"),
+        "resumed": False,
     })
 
 @router.get("/api/translate/{task_id}/progress")
@@ -635,8 +1115,11 @@ async def get_progress(task_id: str, current_user: CurrentUser = Depends(get_cur
         if "status" in task_record:
             requested_pages = task_record.get("requested_pages") or task_record.get("total_pages") or 0
             translated_pages = task_record.get("translated_pages") or task_record.get("processed_pages") or 0
+            task_status = task_record["status"]
+            if task_status == "processing":
+                task_status = "recoverable"
             return JSONResponse({
-                "status": task_record["status"],
+                "status": task_status,
                 "progress": task_record["progress"],
                 "processedPages": task_record["processed_pages"],
                 "totalPages": task_record["total_pages"],
@@ -680,6 +1163,9 @@ async def get_result(task_id: str, current_user: CurrentUser = Depends(get_curre
         })
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Result not found")
+    except Exception as e:
+        safe_print(f"[DEBUG] Export failed for task={task_id}, format={format}, output_type={output_type}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e) or "Failed to export translation")
 
 @router.get("/api/export/{task_id}")
 async def export_translation(
@@ -724,27 +1210,34 @@ async def export_translation(
                 "Expires": "0",
                 "X-Content-Type-Options": "nosniff",
             }
-            if output_type == "translated":
-                # 纯译文版
-                pdf_bytes = pdf_service.generate_translated_pdf(file_id, result)
-                return Response(
-                    pdf_bytes,
+            if output_type in {"translated", "bilingual"}:
+                export_started_at = time.perf_counter()
+                if not pdf_service.has_cached_export_pdf(task_id, output_type):
+                    safe_print(f"[PERF] Export cache miss: task={task_id} output_type={output_type}")
+                    if output_type == "translated":
+                        pdf_bytes = pdf_service.generate_translated_pdf(file_id, result)
+                    else:
+                        pdf_bytes = pdf_service.generate_bilingual_pdf(file_id, result)
+                    pdf_service.save_cached_export_pdf(task_id, output_type, pdf_bytes)
+                    safe_print(
+                        "[PERF] Export cached: "
+                        f"task={task_id} output_type={output_type} "
+                        f"elapsed_ms={(time.perf_counter() - export_started_at) * 1000:.0f}"
+                    )
+                else:
+                    safe_print(
+                        "[PERF] Export cache hit: "
+                        f"task={task_id} output_type={output_type} "
+                        f"elapsed_ms={(time.perf_counter() - export_started_at) * 1000:.0f}"
+                    )
+
+                export_path = pdf_service.get_cached_export_pdf_path(task_id, output_type)
+                return FileResponse(
+                    export_path,
                     media_type="application/pdf",
-                    headers={
-                        **pdf_headers,
-                        "Content-Disposition": f'{disposition_type}; filename="{task_id}_translated.pdf"',
-                    },
-                )
-            elif output_type == "bilingual":
-                # 左右对照版
-                pdf_bytes = pdf_service.generate_bilingual_pdf(file_id, result)
-                return Response(
-                    pdf_bytes,
-                    media_type="application/pdf",
-                    headers={
-                        **pdf_headers,
-                        "Content-Disposition": f'{disposition_type}; filename="{task_id}_bilingual.pdf"',
-                    },
+                    filename=f"{task_id}_{output_type}.pdf",
+                    content_disposition_type=disposition_type,
+                    headers=pdf_headers,
                 )
             else:
                 raise HTTPException(status_code=400, detail="Invalid output_type")

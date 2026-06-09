@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/nextjs';
+import { buildExportUrl, fetchExportPdfBlob } from '@/lib/api';
 
 interface BilingualReaderProps {
   taskId: string;
@@ -30,16 +31,11 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
 
       try {
         const token = await getToken({ skipCache: true });
-        const response = await fetch(`/api/export/${taskId}?format=pdf&output_type=bilingual&v=${previewVersion}`, {
-          cache: 'no-store',
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        });
-
-        if (!response.ok) {
-          throw new Error('Failed to load preview');
-        }
-
-        const blob = await response.blob();
+        const blob = await fetchExportPdfBlob(
+          taskId,
+          `format=pdf&output_type=bilingual&v=${previewVersion}`,
+          token
+        );
         objectUrl = URL.createObjectURL(
           blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' })
         );
@@ -47,9 +43,13 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
         if (!isCancelled) {
           setPreviewUrl(`${objectUrl}#page=1&zoom=page-fit`);
         }
-      } catch {
+      } catch (previewLoadError) {
         if (!isCancelled) {
-          setPreviewError('Failed to load file preview. Please try downloading the file instead.');
+          setPreviewError(
+            previewLoadError instanceof Error
+              ? previewLoadError.message
+              : 'Failed to load file preview. Please try downloading the file instead.'
+          );
           setIsPreviewLoading(false);
         }
       }
@@ -84,14 +84,17 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
 
     setDownloadingType(downloadType);
     try {
-      const downloadUrl = `/api/export/${taskId}?format=pdf&output_type=${downloadType}&download=true&v=${Date.now()}`;
       const token = await getToken({ skipCache: true });
-      const response = await fetch(downloadUrl, {
-        cache: 'no-store',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const response = await fetch(
+        buildExportUrl(taskId, `format=pdf&output_type=${downloadType}&download=true`),
+        {
+          cache: 'no-store',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }
+      );
       if (!response.ok) {
-        throw new Error('Failed to download file');
+        const errorText = await response.text();
+        throw new Error(errorText || 'Failed to download file');
       }
 
       const blob = await response.blob();

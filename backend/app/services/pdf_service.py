@@ -20,6 +20,13 @@ class PDFService:
 
     def get_output_storage_key(self, task_id: str) -> str:
         return f"outputs/{task_id}.json"
+
+    def get_output_page_storage_key(self, task_id: str, page_num: int) -> str:
+        return f"outputs/{task_id}/pages/{page_num + 1}.json"
+
+    def get_export_pdf_storage_key(self, task_id: str, output_type: str) -> str:
+        safe_output_type = "bilingual" if output_type == "bilingual" else "translated"
+        return f"outputs/{task_id}/exports/{safe_output_type}.pdf"
     
     def save_uploaded_file(self, file_content: bytes) -> str:
         file_id = str(uuid.uuid4())
@@ -174,11 +181,23 @@ class PDFService:
         text = page.get_text()
         doc.close()
         return text
+
+    def extract_page_content(self, file_id: str, page_num: int) -> Dict[str, Any]:
+        return {
+            "fullText": self.extract_full_text(file_id, page_num),
+            "textBlocks": self.extract_text_blocks(file_id, page_num),
+        }
     
     def save_translation_result(self, task_id: str, result: Dict[str, Any]):
         import json
         content = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
         storage_service.save_bytes(self.get_output_storage_key(task_id), content)
+        self.delete_cached_export_pdfs(task_id)
+
+    def save_page_translation_result(self, task_id: str, page_num: int, result: Dict[str, Any]) -> None:
+        import json
+        content = json.dumps(result, ensure_ascii=False, indent=2).encode("utf-8")
+        storage_service.save_bytes(self.get_output_page_storage_key(task_id, page_num), content)
     
     def load_translation_result(self, task_id: str) -> Dict[str, Any]:
         storage_key = self.get_output_storage_key(task_id)
@@ -187,6 +206,37 @@ class PDFService:
         
         import json
         return json.loads(storage_service.read_bytes(storage_key).decode("utf-8"))
+
+    def load_page_translation_results(self, task_id: str) -> List[Dict[str, Any]]:
+        import json
+
+        page_results: List[Dict[str, Any]] = []
+        page_num = 0
+        while True:
+            storage_key = self.get_output_page_storage_key(task_id, page_num)
+            if not storage_service.exists(storage_key):
+                break
+            page_results.append(json.loads(storage_service.read_bytes(storage_key).decode("utf-8")))
+            page_num += 1
+        return page_results
+
+    def has_cached_export_pdf(self, task_id: str, output_type: str) -> bool:
+        return storage_service.exists(self.get_export_pdf_storage_key(task_id, output_type))
+
+    def get_cached_export_pdf_path(self, task_id: str, output_type: str) -> str:
+        return storage_service.get_local_path(self.get_export_pdf_storage_key(task_id, output_type))
+
+    def load_cached_export_pdf(self, task_id: str, output_type: str) -> bytes:
+        return storage_service.read_bytes(self.get_export_pdf_storage_key(task_id, output_type))
+
+    def save_cached_export_pdf(self, task_id: str, output_type: str, pdf_bytes: bytes) -> None:
+        storage_service.save_bytes(self.get_export_pdf_storage_key(task_id, output_type), pdf_bytes)
+
+    def delete_cached_export_pdfs(self, task_id: str) -> None:
+        for output_type in ("translated", "bilingual"):
+            storage_key = self.get_export_pdf_storage_key(task_id, output_type)
+            if storage_service.exists(storage_key):
+                storage_service.delete(storage_key)
 
     def _find_existing_font(self, font_paths: List[str]) -> str:
         for font_path in font_paths:
@@ -827,6 +877,18 @@ class PDFService:
         fill_color,
         preserve_marker: bool = False,
     ):
+        visible_lines = [
+            line for line in block.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ]
+        line_count = len(visible_lines)
+        block_font_size = float(block.get("font_size") or 0)
+        clean_text = self._normalize_pdf_text(block.get("text", ""))
+        compact_heading = (
+            line_count <= 1
+            and len(clean_text) <= 40
+            and block_font_size >= 18
+        )
         span_rects = []
         for line in block.get("lines", []):
             for span in line.get("spans", []):
@@ -849,12 +911,16 @@ class PDFService:
             span_rects = [fallback_rect]
 
         for span_rect in span_rects:
-            underline_padding = max(1.8, span_rect.height * 0.12)
+            bottom_padding = (
+                min(0.8, span_rect.height * 0.04)
+                if compact_heading
+                else min(1.4, max(0.7, span_rect.height * 0.08))
+            )
             cover_rect = fitz.Rect(
                 page_width + span_rect.x0 - 0.6,
                 span_rect.y0 - 0.6,
                 page_width + span_rect.x1 + 0.6,
-                span_rect.y1 + underline_padding,
+                span_rect.y1 + bottom_padding,
             )
             if cover_rect.is_empty:
                 continue
