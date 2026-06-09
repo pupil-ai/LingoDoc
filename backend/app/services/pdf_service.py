@@ -1,5 +1,6 @@
 import fitz
 import os
+import re
 import uuid
 import unicodedata
 from typing import List, Dict, Any
@@ -70,6 +71,7 @@ class PDFService:
             raise ValueError("Invalid page number")
         
         page = doc[page_num]
+        page_rect = page.rect
         text_blocks = []
         
         # 使用 get_text("dict") 获取完整的文本信息，包括字体详情
@@ -138,14 +140,20 @@ class PDFService:
             
             if block_text.strip():
                 clean_block_text = block_text.strip()
-                text_blocks.append({
+                block_payload = {
                     "type": "text",
                     "bbox": {"x0": block_x0, "y0": block_y0, "x1": block_x1, "y1": block_y1},
                     "text": clean_block_text,
                     "font_size": block_font_size,
                     "lines": block_lines,
                     "is_formula": self._is_formula_like_text(clean_block_text),
-                })
+                }
+                block_payload["is_header_footer_metadata"] = self._is_header_footer_metadata_block(
+                    block_payload,
+                    page_rect,
+                    page_num,
+                )
+                text_blocks.append(block_payload)
         
         text_blocks.sort(key=lambda b: (b["bbox"]["y0"], b["bbox"]["x0"]))
         text_blocks = self._merge_text_blocks(text_blocks)
@@ -280,6 +288,108 @@ class PDFService:
         bbox = block.get("bbox", {})
         return fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
 
+    def _is_header_footer_metadata_block(
+        self,
+        block: Dict[str, Any],
+        page_rect: fitz.Rect,
+        page_num: int = 0,
+    ) -> bool:
+        if block.get("type") != "text" or block.get("is_formula"):
+            return False
+
+        rect = self._block_rect(block)
+        if rect.is_empty or rect.width <= 0 or rect.height <= 0 or page_rect.height <= 0:
+            return False
+
+        top_band = max(36.0, page_rect.height * 0.08)
+        bottom_band = max(42.0, page_rect.height * 0.08)
+        in_top_band = rect.y0 <= top_band
+        in_bottom_band = rect.y1 >= page_rect.height - bottom_band
+        if not (in_top_band or in_bottom_band):
+            return False
+
+        clean_text = self._normalize_pdf_text(block.get("text", ""))
+        if not clean_text:
+            return False
+
+        text_lower = clean_text.lower()
+        text_no_space = re.sub(r"\s+", "", clean_text)
+        has_url = any(token in text_lower for token in ("www.", "http://", "https://", ".org", ".com", ".edu"))
+        has_email = "@" in clean_text and "." in clean_text
+        page_number_only = text_no_space.isdigit() and len(text_no_space) <= 6
+        has_metadata_markers = bool(re.search(r"\b(?:issn|doi|vol\.?|volume|issue|copyright)\b", clean_text, re.IGNORECASE))
+        has_publisher_marker = "published by" in text_lower
+        has_copyright_marker = "©" in clean_text or "(c)" in text_lower
+        has_volume_page_pattern = bool(re.search(r"\b\d{1,3}\s*:\s*\d{2,6}(?:\s*[-–—]\s*\d{2,6})?\b", clean_text))
+        strong_bottom_metadata = (
+            in_bottom_band and
+            (
+                has_publisher_marker or
+                has_copyright_marker or
+                has_metadata_markers or
+                (has_url and has_volume_page_pattern)
+            )
+        )
+
+        if strong_bottom_metadata:
+            return True
+
+        line_texts = [
+            self._normalize_pdf_text(line.get("text", ""))
+            for line in block.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ]
+        line_count = len(line_texts)
+        if line_count == 0 or line_count > 4 or len(clean_text) > 120:
+            return False
+
+        font_size = float(block.get("font_size") or 0)
+        if font_size > 14:
+            return False
+
+        page_width = max(page_rect.width, 1)
+        width_ratio = rect.width / page_width
+        near_left_edge = rect.x0 <= page_width * 0.16
+        near_right_edge = rect.x1 >= page_width * 0.84
+        centered_block = abs((rect.x0 + rect.x1) / 2 - page_width / 2) <= page_width * 0.12
+        top_header_like_position = near_left_edge or near_right_edge or centered_block
+
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9./:@_-]*", clean_text)
+        word_count = len(words)
+        mostly_digits = bool(text_no_space) and sum(char.isdigit() for char in text_no_space) >= max(3, len(text_no_space) // 3)
+        has_sentence_punctuation = bool(re.search(r"[.!?;:]\s+[A-Z]", clean_text))
+        looks_sentence_like = clean_text.endswith((".", "?", "!")) and len(clean_text) > 70
+        page_label_like = bool(re.fullmatch(r"(page\s*)?\d{1,4}", text_lower.strip()))
+
+        if has_url or has_email or has_metadata_markers or page_number_only:
+            return True
+
+        if in_top_band and page_num == 0:
+            return False
+
+        if in_bottom_band:
+            if line_count <= 3 and word_count <= 10 and mostly_digits:
+                return True
+            if line_count <= 3 and word_count <= 8 and not has_sentence_punctuation and not looks_sentence_like:
+                return True
+
+        if in_top_band:
+            if page_label_like:
+                return True
+            if (
+                top_header_like_position
+                and width_ratio <= 0.42
+                and font_size <= 11.5
+                and line_count <= 2
+                and word_count <= 10
+                and len(clean_text) <= 70
+                and not has_sentence_punctuation
+                and not looks_sentence_like
+            ):
+                return True
+
+        return False
+
     def _is_marker_heading(self, block: Dict[str, Any]) -> bool:
         text = self._normalize_pdf_text(block.get("text", ""))
         if not text:
@@ -383,6 +493,10 @@ class PDFService:
         )
         merged["lines"] = previous.get("lines", []) + current.get("lines", [])
         merged["merged_blocks"] = previous.get("merged_blocks", 1) + current.get("merged_blocks", 1)
+        merged["is_header_footer_metadata"] = (
+            previous.get("is_header_footer_metadata", False) or
+            current.get("is_header_footer_metadata", False)
+        )
         return merged
 
     def _merge_text_blocks(self, text_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1032,6 +1146,7 @@ class PDFService:
             if block.get("type") == "text"
             and block.get("translatedText")
             and not block.get("is_formula")
+            and not block.get("is_header_footer_metadata")
             and self.is_translatable_text_block(block)
         ]
         return self._merge_text_blocks(text_blocks)
@@ -1426,6 +1541,7 @@ class PDFService:
                 if block.get("type") == "text"
                 and block.get("translatedText")
                 and not block.get("is_formula")
+                and not block.get("is_header_footer_metadata")
                 and self.is_translatable_text_block(block)
             ]
             text_blocks = self._merge_text_blocks(text_blocks)

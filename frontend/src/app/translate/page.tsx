@@ -262,6 +262,8 @@ function TranslatePageContent() {
   const isProcessingHistoryEntry = initialTaskStatus === 'processing';
   const [isRestoringCompletedTask, setIsRestoringCompletedTask] = useState(Boolean(initialTaskId && isCompletedHistoryEntry));
   const restoredCompletedTaskIdRef = useRef<string | null>(null);
+  const isPollingRef = useRef(false);
+  const pollErrorCountRef = useRef(0);
 
   const displayFileName = filename || fileId || 'document.pdf';
   const knownTotalPages = progress.totalPages || result?.totalPages || initialTotalPages || 0;
@@ -302,6 +304,33 @@ function TranslatePageContent() {
 
     return `${formatPlanName(usage.plan)} | Document: ${knownTotalPages} pages | Remaining: ${usage.remainingPages ?? 'Unlimited'} pages`;
   }, [isUsageLoading, knownTotalPages, usage]);
+
+  const statusSummaryParts = useMemo(() => statusSummary.split(' | '), [statusSummary]);
+  const remainingPagesToneClass = isFreePlan
+    ? 'font-medium text-slate-500'
+    : isStartBlocked
+      ? 'font-semibold text-orange-600'
+      : 'font-semibold text-green-600';
+
+  const mergeProgress = useCallback(
+    (current: TranslationProgress, incoming: TranslationProgress): TranslationProgress => {
+      const incomingProcessed = incoming.processedPages ?? 0;
+      const incomingTranslated = incoming.translatedPages ?? 0;
+      const currentProcessed = current.processedPages ?? 0;
+      const currentTranslated = current.translatedPages ?? 0;
+      const mergedProcessed = Math.max(currentProcessed, incomingProcessed, incomingTranslated);
+      const mergedTranslated = Math.max(currentTranslated, incomingTranslated, incomingProcessed);
+
+      return {
+        ...current,
+        ...incoming,
+        progress: Math.max(current.progress ?? 0, incoming.progress ?? 0),
+        processedPages: mergedProcessed,
+        translatedPages: mergedTranslated,
+      };
+    },
+    []
+  );
 
   const loadUsage = useCallback(async () => {
     if (!isLoaded || !isSignedIn) {
@@ -429,31 +458,41 @@ function TranslatePageContent() {
   };
 
   const pollProgress = useCallback(async () => {
-    if (!taskId) {
+    if (!taskId || isPollingRef.current) {
       return;
     }
 
+    isPollingRef.current = true;
     try {
       const token = await getToken({ skipCache: true });
       const progressData = await getTranslationProgress(taskId, token);
-      setProgress(progressData);
+      setProgress((current) => mergeProgress(current, progressData));
 
       if (progressData.status === 'completed') {
+        pollErrorCountRef.current = 0;
+        setError('');
         setIsPreparingPreview(true);
         const resultData = await getTranslationResult(taskId, token);
         setResult(resultData);
         setIsPreparingPreview(false);
         await loadPreview(taskId);
-      } else if (progressData.status === 'processing') {
-        setTimeout(pollProgress, 2000);
-      } else {
+      } else if (progressData.status === 'error') {
+        pollErrorCountRef.current = 0;
         setError(progressData.error || 'Translation task failed.');
+      } else {
+        pollErrorCountRef.current = 0;
+        setError('');
       }
     } catch (pollError) {
       setIsPreparingPreview(false);
-      setError(pollError instanceof Error ? pollError.message : 'Failed to get translation progress.');
+      pollErrorCountRef.current += 1;
+      if (pollErrorCountRef.current >= 3) {
+        setError(pollError instanceof Error ? pollError.message : 'Failed to get translation progress.');
+      }
+    } finally {
+      isPollingRef.current = false;
     }
-  }, [getToken, loadPreview, taskId]);
+  }, [getToken, loadPreview, mergeProgress, taskId]);
 
   useEffect(() => {
     loadUsage();
@@ -505,7 +544,12 @@ function TranslatePageContent() {
 
   useEffect(() => {
     if (!isRestoringCompletedTask && taskId && progress.status === 'processing' && !result) {
-      pollProgress();
+      void pollProgress();
+      const timer = window.setInterval(() => {
+        void pollProgress();
+      }, 2000);
+
+      return () => window.clearInterval(timer);
     }
   }, [isRestoringCompletedTask, pollProgress, progress.status, result, taskId]);
 
@@ -544,7 +588,7 @@ function TranslatePageContent() {
       try {
         const token = await getToken({ skipCache: true });
         const progressData = await getTranslationProgress(initialTaskId, token);
-        setProgress(progressData);
+        setProgress((current) => mergeProgress(current, progressData));
 
         if (progressData.status === 'completed') {
           setTaskId(initialTaskId);
@@ -565,7 +609,7 @@ function TranslatePageContent() {
     }
 
     loadExistingResult();
-  }, [getToken, initialTaskId, isCompletedHistoryEntry, isLoaded, isSignedIn, loadPreview, result]);
+  }, [getToken, initialTaskId, isCompletedHistoryEntry, isLoaded, isSignedIn, loadPreview, mergeProgress, result]);
 
   const handleDownload = async (type: DownloadType) => {
     if (!taskId || downloadingType) {
@@ -591,8 +635,12 @@ function TranslatePageContent() {
       link.download = `${displayFileName.replace(/\.pdf$/i, '')}_${type}.pdf`;
       document.body.appendChild(link);
       link.click();
-      link.remove();
-      URL.revokeObjectURL(objectUrl);
+      window.setTimeout(() => {
+        if (link.parentNode) {
+          link.parentNode.removeChild(link);
+        }
+        URL.revokeObjectURL(objectUrl);
+      }, 0);
       setDownloadToast({
         type: 'success',
         message: 'Download started.',
@@ -745,8 +793,17 @@ function TranslatePageContent() {
                 </div>
               ) : !isRestoringCompletedResult ? (
                 <div className="rounded-xl border border-slate-200 bg-white px-6 py-3 text-[14px] font-medium text-slate-500">
-                  {statusSummary.split(' | ').map((part, index) => (
-                    <span key={part} className={index === 0 ? 'font-semibold text-slate-700' : undefined}>
+                  {statusSummaryParts.map((part, index) => (
+                    <span
+                      key={part}
+                      className={
+                        part.startsWith('Remaining:')
+                          ? remainingPagesToneClass
+                          : index === 0
+                            ? 'font-semibold text-slate-700'
+                            : undefined
+                      }
+                    >
                       {index > 0 ? ' | ' : ''}
                       {part}
                     </span>
@@ -760,10 +817,19 @@ function TranslatePageContent() {
                 </p>
               ) : null}
 
-              {isStartBlocked && usage && !isStartingTranslation && !isRestoringCompletedResult ? (
+              {isFreePlan && !isStartingTranslation && !isRestoringCompletedResult && usage ? (
                 <a href="/pricing" className="inline-flex text-[13px] font-semibold text-emerald-600">
                   View plans and limits
                 </a>
+              ) : null}
+
+              {isStartBlocked && usage && !isStartingTranslation && !isRestoringCompletedResult ? (
+                <div className="inline-flex items-center gap-2 text-[13px] font-semibold">
+                  <span className="text-orange-600">Not enough remaining pages</span>
+                  <a href="/pricing" className="text-emerald-600">
+                    View plans and limits
+                  </a>
+                </div>
               ) : null}
             </div>
           }

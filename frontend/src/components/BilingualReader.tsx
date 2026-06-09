@@ -104,8 +104,12 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
       link.download = `${taskId}_${downloadType}.pdf`;
       document.body.appendChild(link);
       link.click();
-      link.remove();
-      URL.revokeObjectURL(objectUrl);
+      window.setTimeout(() => {
+        if (link.parentNode) {
+          link.parentNode.removeChild(link);
+        }
+        URL.revokeObjectURL(objectUrl);
+      }, 0);
     } finally {
       setDownloadingType(null);
     }

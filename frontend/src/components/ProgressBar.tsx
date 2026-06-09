@@ -8,7 +8,7 @@ interface ProgressBarProps {
 
 export function ProgressBar({ progress }: ProgressBarProps) {
   const percentage = Math.max(0, Math.min(100, progress.progress || 0));
-  const processedPages = progress.translatedPages ?? progress.processedPages ?? 0;
+  const processedPages = Math.max(progress.translatedPages ?? 0, progress.processedPages ?? 0);
   const totalPages = progress.requestedPages ?? progress.totalPages ?? 0;
 
   return (

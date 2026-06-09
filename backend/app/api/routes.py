@@ -217,7 +217,11 @@ def _build_page_translated_text(translated_blocks: list[Dict[str, Any]]) -> str:
     translated_parts = [
         block.get("translatedText", "").strip()
         for block in translated_blocks
-        if block.get("type") == "text" and block.get("translatedText", "").strip()
+        if (
+            block.get("type") == "text"
+            and not block.get("is_header_footer_metadata")
+            and block.get("translatedText", "").strip()
+        )
     ]
     return "\n".join(translated_parts)
 
@@ -487,6 +491,18 @@ async def translate_pdf_task(
                         "font_size": block.get("font_size"),
                         "lines": block.get("lines", []),
                         "is_formula": True,
+                        "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
+                    })
+                elif block.get("is_header_footer_metadata"):
+                    translated_blocks.append({
+                        "type": "text",
+                        "bbox": block["bbox"],
+                        "text": block["text"],
+                        "translatedText": "",
+                        "font_size": block.get("font_size"),
+                        "lines": block.get("lines", []),
+                        "is_formula": False,
+                        "is_header_footer_metadata": True,
                     })
                 else:
                     # 文本块，逐块翻译
@@ -502,6 +518,7 @@ async def translate_pdf_task(
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
                             "is_formula": False,
+                            "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
                         })
                     except Exception as e:
                         safe_print(f"[DEBUG] Block translation failed: {str(e)}")
@@ -513,6 +530,7 @@ async def translate_pdf_task(
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
                             "is_formula": False,
+                            "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
                         })
             
             # 整页翻译用于预览
