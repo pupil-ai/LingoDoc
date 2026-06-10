@@ -72,7 +72,7 @@ def _describe_token_for_log(token: str) -> str:
         return f"failed_to_decode_unverified_token={type(exc).__name__}: {str(exc)}"
 
 
-async def get_current_user(authorization: Optional[str] = Header(default=None)) -> CurrentUser:
+def _validate_current_user_from_authorization(authorization: Optional[str]) -> CurrentUser:
     token = _get_bearer_token(authorization)
     issuer = _get_clerk_issuer()
     audience = os.getenv("CLERK_JWT_AUDIENCE", "").strip()
@@ -110,3 +110,13 @@ async def get_current_user(authorization: Optional[str] = Header(default=None)) 
         )
 
     return CurrentUser(id=user_id, claims=claims)
+
+
+async def get_current_user(authorization: Optional[str] = Header(default=None)) -> CurrentUser:
+    return _validate_current_user_from_authorization(authorization)
+
+
+async def get_optional_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[CurrentUser]:
+    if not authorization:
+        return None
+    return _validate_current_user_from_authorization(authorization)

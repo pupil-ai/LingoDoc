@@ -85,11 +85,9 @@ class PDFService:
         
         # 使用 get_text("dict") 获取完整的文本信息，包括字体详情
         text_info = page.get_text("dict")
+        graphic_regions = self._collect_graphic_regions(page, text_info)
         
         for block in text_info.get("blocks", []):
-            block_text = ""
-            block_font_size = 0
-            block_x0, block_y0, block_x1, block_y1 = float('inf'), float('inf'), 0, 0
             block_lines = []
             
             for line in block.get("lines", []):
@@ -131,15 +129,8 @@ class PDFService:
                         "color": span.get("color", 0),
                         "flags": span.get("flags", 0),
                     })
-                    block_font_size = max(block_font_size, span.get("size", 0))
-                    block_x0 = min(block_x0, span["bbox"][0])
-                    block_y0 = min(block_y0, span["bbox"][1])
-                    block_x1 = max(block_x1, span["bbox"][2])
-                    block_y1 = max(block_y1, span["bbox"][3])
-
                 if line_text_parts:
                     line_text = " ".join(line_text_parts)
-                    block_text += line_text + " "
                     block_lines.append({
                         "text": line_text,
                         "bbox": {"x0": line_x0, "y0": line_y0, "x1": line_x1, "y1": line_y1},
@@ -147,25 +138,14 @@ class PDFService:
                         "spans": line_spans,
                     })
             
-            if block_text.strip():
-                clean_block_text = block_text.strip()
-                block_payload = {
-                    "type": "text",
-                    "bbox": {"x0": block_x0, "y0": block_y0, "x1": block_x1, "y1": block_y1},
-                    "text": clean_block_text,
-                    "font_size": block_font_size,
-                    "lines": block_lines,
-                    "is_formula": self._is_formula_like_text(clean_block_text),
-                }
-                block_payload["is_header_footer_metadata"] = self._is_header_footer_metadata_block(
-                    block_payload,
-                    page_rect,
-                    page_num,
-                )
-                text_blocks.append(block_payload)
+            if block_lines:
+                for block_payload in self._split_text_block_from_lines(block_lines, page_rect, page_num):
+                    text_blocks.append(block_payload)
         
         text_blocks.sort(key=lambda b: (b["bbox"]["y0"], b["bbox"]["x0"]))
         text_blocks = self._merge_text_blocks(text_blocks)
+        self._refine_header_footer_metadata_flags(text_blocks)
+        self._mark_chart_text_blocks(text_blocks, page_rect, graphic_regions)
         
         doc.close()
         return text_blocks
@@ -265,6 +245,141 @@ class PDFService:
     def _has_emoji(self, text: str) -> bool:
         return any(ord(char) > 0xFFFF for char in text)
 
+    def _line_rect(self, line: Dict[str, Any]) -> fitz.Rect:
+        bbox = line.get("bbox", {})
+        return fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+
+    def _line_is_heading_like(self, line: Dict[str, Any], block_width: float) -> bool:
+        text = self._normalize_pdf_text(line.get("text", ""))
+        if not text:
+            return False
+
+        rect = self._line_rect(line)
+        font_size = float(line.get("font_size") or 0)
+        if font_size <= 0 or block_width <= 0:
+            return False
+
+        line_width = rect.width
+        word_count = len(re.findall(r"[A-Za-z0-9]+(?:[./:-][A-Za-z0-9]+)*", text))
+        short_heading = len(text) <= 90 and word_count <= 12
+        compact_heading = line_width <= block_width * 0.82
+        ends_like_heading = not text.endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "："))
+        return short_heading and compact_heading and ends_like_heading
+
+    def _should_split_segment(
+        self,
+        current_line: Dict[str, Any],
+        previous_line: Dict[str, Any],
+        block_left: float,
+        block_width: float,
+    ) -> bool:
+        current_rect = self._line_rect(current_line)
+        previous_rect = self._line_rect(previous_line)
+        current_text = self._normalize_pdf_text(current_line.get("text", ""))
+        previous_text = self._normalize_pdf_text(previous_line.get("text", ""))
+        current_font = float(current_line.get("font_size") or 0)
+        previous_font = float(previous_line.get("font_size") or 0)
+
+        if not current_text or not previous_text:
+            return False
+
+        vertical_gap = current_rect.y0 - previous_rect.y1
+        previous_indent = max(previous_rect.x0 - block_left, 0)
+        current_indent = max(current_rect.x0 - block_left, 0)
+        previous_width = previous_rect.width
+        punctuation_end = previous_text.endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "："))
+
+        if vertical_gap > max(max(previous_font, current_font) * 0.35, 3.2):
+            return True
+
+        if (
+            current_indent >= max(current_font * 0.7, 7.5)
+            and current_indent > previous_indent + max(previous_font * 0.35, 3.0)
+            and punctuation_end
+        ):
+            return True
+
+        if (
+            punctuation_end
+            and previous_width <= block_width * 0.76
+            and current_indent <= max(current_font * 0.3, 3.0)
+        ):
+            return True
+
+        if (
+            previous_font > 0
+            and current_font > 0
+            and previous_font >= current_font * 1.06
+            and self._line_is_heading_like(previous_line, block_width)
+        ):
+            return True
+
+        return False
+
+    def _build_text_block_payload(
+        self,
+        lines: List[Dict[str, Any]],
+        page_rect: fitz.Rect,
+        page_num: int,
+    ) -> Dict[str, Any]:
+        rect = self._line_rect(lines[0])
+        for line in lines[1:]:
+            rect = rect | self._line_rect(line)
+
+        text = " ".join(
+            self._normalize_pdf_text(line.get("text", ""))
+            for line in lines
+            if self._normalize_pdf_text(line.get("text", ""))
+        ).strip()
+        font_size = max(float(line.get("font_size") or 0) for line in lines)
+        block_payload = {
+            "type": "text",
+            "bbox": {"x0": rect.x0, "y0": rect.y0, "x1": rect.x1, "y1": rect.y1},
+            "text": text,
+            "font_size": font_size,
+            "lines": lines,
+            "is_formula": self._is_formula_like_text(text),
+        }
+        block_payload["is_header_footer_metadata"] = self._is_header_footer_metadata_block(
+            block_payload,
+            page_rect,
+            page_num,
+        )
+        return block_payload
+
+    def _split_text_block_from_lines(
+        self,
+        block_lines: List[Dict[str, Any]],
+        page_rect: fitz.Rect,
+        page_num: int,
+    ) -> List[Dict[str, Any]]:
+        if not block_lines:
+            return []
+
+        block_left = min(line["bbox"]["x0"] for line in block_lines)
+        block_right = max(line["bbox"]["x1"] for line in block_lines)
+        block_width = max(block_right - block_left, 1.0)
+
+        segments: List[List[Dict[str, Any]]] = []
+        current_segment: List[Dict[str, Any]] = [block_lines[0]]
+
+        for line in block_lines[1:]:
+            previous_line = current_segment[-1]
+            if self._should_split_segment(line, previous_line, block_left, block_width):
+                segments.append(current_segment)
+                current_segment = [line]
+            else:
+                current_segment.append(line)
+
+        if current_segment:
+            segments.append(current_segment)
+
+        return [
+            self._build_text_block_payload(lines, page_rect, page_num)
+            for lines in segments
+            if any(self._normalize_pdf_text(line.get("text", "")) for line in lines)
+        ]
+
     def _is_formula_like_text(self, text: str) -> bool:
         clean_text = self._normalize_pdf_text(text)
         compact_text = "".join(char for char in clean_text if not char.isspace())
@@ -300,7 +415,247 @@ class PDFService:
     def is_translatable_text_block(self, block: Dict[str, Any]) -> bool:
         if block.get("type") != "text":
             return False
+        if block.get("is_chart_text"):
+            return False
         return not self._is_formula_like_text(block.get("text", ""))
+
+    def _collect_graphic_regions(self, page, text_info: Dict[str, Any]) -> List[fitz.Rect]:
+        regions: List[fitz.Rect] = []
+
+        for block in text_info.get("blocks", []):
+            if block.get("type") == 0:
+                continue
+            bbox = block.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            rect = fitz.Rect(*bbox)
+            if not rect.is_empty and rect.width > 0 and rect.height > 0:
+                regions.append(rect)
+
+        for drawing in page.get_drawings():
+            rect = drawing.get("rect")
+            if not rect:
+                continue
+            draw_rect = fitz.Rect(rect)
+            if draw_rect.is_empty or draw_rect.width <= 0 or draw_rect.height <= 0:
+                continue
+            regions.append(draw_rect)
+
+        return self._merge_overlapping_regions(regions, gap=6.0)
+
+    def _merge_overlapping_regions(self, regions: List[fitz.Rect], gap: float = 0.0) -> List[fitz.Rect]:
+        merged_regions: List[fitz.Rect] = []
+
+        for region in sorted(regions, key=lambda rect: (rect.y0, rect.x0, rect.y1, rect.x1)):
+            current = fitz.Rect(region)
+            for index, existing in enumerate(merged_regions):
+                expanded_existing = fitz.Rect(
+                    existing.x0 - gap,
+                    existing.y0 - gap,
+                    existing.x1 + gap,
+                    existing.y1 + gap,
+                )
+                if expanded_existing.intersects(current):
+                    merged_regions[index] = existing | current
+                    break
+            else:
+                merged_regions.append(current)
+
+        changed = True
+        while changed:
+            changed = False
+            result: List[fitz.Rect] = []
+            for region in merged_regions:
+                for index, existing in enumerate(result):
+                    expanded_existing = fitz.Rect(
+                        existing.x0 - gap,
+                        existing.y0 - gap,
+                        existing.x1 + gap,
+                        existing.y1 + gap,
+                    )
+                    if expanded_existing.intersects(region):
+                        result[index] = existing | region
+                        changed = True
+                        break
+                else:
+                    result.append(region)
+            merged_regions = result
+
+        return merged_regions
+
+    def _is_chart_label_candidate(
+        self,
+        block: Dict[str, Any],
+        rect: fitz.Rect,
+        font_size: float,
+        *,
+        allow_multiline: bool = False,
+    ) -> bool:
+        clean_text = self._normalize_pdf_text(block.get("text", ""))
+        if not clean_text:
+            return False
+
+        line_count = len([
+            line for line in block.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ])
+        if not allow_multiline and line_count > 4:
+            return False
+
+        compact_text = "".join(char for char in clean_text if not char.isspace())
+        word_count = len(re.findall(r"[A-Za-z0-9]+(?:[./:-][A-Za-z0-9]+)*", clean_text))
+        digit_count = sum(1 for char in compact_text if char.isdigit())
+        letter_count = sum(1 for char in compact_text if char.isalpha())
+        uppercase_count = sum(1 for char in compact_text if char.isupper())
+        uppercase_ratio = uppercase_count / max(letter_count, 1)
+        vertical_label = rect.height > rect.width * 1.8
+
+        if font_size <= 6.1 and len(clean_text) <= 8 and digit_count >= 1:
+            return True
+        if font_size <= 6.3 and word_count >= 10 and rect.height <= 28:
+            return True
+        if font_size <= 6.8 and word_count <= 8:
+            return True
+        if font_size <= 6.8 and digit_count >= max(2, letter_count // 2):
+            return True
+        if font_size <= 6.8 and uppercase_ratio >= 0.55 and word_count <= 10:
+            return True
+        if font_size <= 7.2 and vertical_label and len(clean_text) <= 90:
+            return True
+
+        return False
+
+    def _mark_chart_text_blocks(
+        self,
+        text_blocks: List[Dict[str, Any]],
+        page_rect: fitz.Rect,
+        graphic_regions: List[fitz.Rect],
+    ) -> None:
+        cached_rects: List[fitz.Rect] = []
+        cached_fonts: List[float] = []
+        label_candidate_indexes: List[int] = []
+        seed_indexes: List[int] = []
+        large_graphic_regions = [
+            region for region in graphic_regions
+            if region.width >= page_rect.width * 0.18 and region.height >= 60
+        ]
+
+        for block in text_blocks:
+            rect = self._block_rect(block)
+            cached_rects.append(rect)
+            cached_fonts.append(self._font_size_for_merge(block, rect))
+            block["is_chart_text"] = False
+
+        for index, block in enumerate(text_blocks):
+            if block.get("type") != "text" or block.get("is_formula") or block.get("is_header_footer_metadata"):
+                continue
+
+            rect = cached_rects[index]
+            font_size = cached_fonts[index]
+            clean_text = self._normalize_pdf_text(block.get("text", ""))
+            if not clean_text or rect.is_empty:
+                continue
+
+            if self._is_chart_label_candidate(block, rect, font_size, allow_multiline=True):
+                label_candidate_indexes.append(index)
+
+            intersects_large_graphic_region = False
+            for region in large_graphic_regions:
+                expanded_region = fitz.Rect(region.x0 - 6, region.y0 - 6, region.x1 + 6, region.y1 + 6)
+                if not expanded_region.intersects(rect):
+                    continue
+                intersects_large_graphic_region = True
+                region_lower_half_start = region.y0 + min(140.0, region.height * 0.45)
+                if (
+                    self._is_chart_label_candidate(block, rect, font_size, allow_multiline=True)
+                    or (font_size <= 7.2 and rect.y0 >= region_lower_half_start and len(clean_text) <= 220)
+                ):
+                    block["is_chart_text"] = True
+                    seed_indexes.append(index)
+                    break
+
+            if intersects_large_graphic_region and block["is_chart_text"]:
+                continue
+
+        remaining_candidates = [index for index in label_candidate_indexes if not text_blocks[index].get("is_chart_text")]
+        candidate_clusters: List[List[int]] = []
+
+        for index in remaining_candidates:
+            current_rect = cached_rects[index]
+            current_cluster: List[int] = []
+            for other_index in remaining_candidates:
+                other_rect = cached_rects[other_index]
+                expanded_rect = fitz.Rect(
+                    current_rect.x0 - 30,
+                    current_rect.y0 - 22,
+                    current_rect.x1 + 30,
+                    current_rect.y1 + 22,
+                )
+                if expanded_rect.intersects(other_rect):
+                    current_cluster.append(other_index)
+
+            if current_cluster:
+                candidate_clusters.append(sorted(set(current_cluster)))
+
+        unique_clusters: List[List[int]] = []
+        seen_clusters = set()
+        for cluster in candidate_clusters:
+            cluster_key = tuple(cluster)
+            if cluster_key in seen_clusters:
+                continue
+            seen_clusters.add(cluster_key)
+            unique_clusters.append(cluster)
+
+        for cluster in unique_clusters:
+            if len(cluster) < 3:
+                continue
+
+            cluster_rect = cached_rects[cluster[0]]
+            for cluster_index in cluster[1:]:
+                cluster_rect = cluster_rect | cached_rects[cluster_index]
+
+            overlaps_large_graphic_region = any(
+                fitz.Rect(region.x0 - 12, region.y0 - 12, region.x1 + 12, region.y1 + 12).intersects(cluster_rect)
+                for region in large_graphic_regions
+            )
+            if not (
+                len(cluster) >= 4
+                or (len(cluster) >= 3 and overlaps_large_graphic_region)
+            ):
+                continue
+
+            for cluster_index in cluster:
+                if not text_blocks[cluster_index].get("is_chart_text"):
+                    text_blocks[cluster_index]["is_chart_text"] = True
+                    seed_indexes.append(cluster_index)
+
+        changed = True
+        while changed:
+            changed = False
+            for index, block in enumerate(text_blocks):
+                if block.get("is_chart_text"):
+                    continue
+                if block.get("type") != "text" or block.get("is_formula") or block.get("is_header_footer_metadata"):
+                    continue
+
+                rect = cached_rects[index]
+                font_size = cached_fonts[index]
+                if not self._is_chart_label_candidate(block, rect, font_size):
+                    continue
+
+                for seed_index in seed_indexes:
+                    seed_rect = cached_rects[seed_index]
+                    expanded_seed_rect = fitz.Rect(
+                        seed_rect.x0 - 36,
+                        seed_rect.y0 - 28,
+                        seed_rect.x1 + 36,
+                        seed_rect.y1 + 28,
+                    )
+                    if expanded_seed_rect.intersects(rect):
+                        block["is_chart_text"] = True
+                        seed_indexes.append(index)
+                        changed = True
+                        break
 
     def _is_marker_prefix_char(self, char: str) -> bool:
         if not char:
@@ -442,6 +797,53 @@ class PDFService:
 
         return False
 
+    def _refine_header_footer_metadata_flags(self, text_blocks: List[Dict[str, Any]]) -> None:
+        for index, block in enumerate(text_blocks):
+            if not block.get("is_header_footer_metadata"):
+                continue
+            if block.get("type") != "text" or block.get("is_formula"):
+                continue
+
+            rect = self._block_rect(block)
+            font_size = self._font_size_for_merge(block, rect)
+            if font_size <= 0:
+                continue
+
+            block_width = max(rect.width, 1.0)
+            block_lines = [
+                line for line in block.get("lines", [])
+                if self._normalize_pdf_text(line.get("text", ""))
+            ]
+            clean_text = self._normalize_pdf_text(block.get("text", ""))
+            word_count = len(re.findall(r"[A-Za-z0-9]+(?:[./:-][A-Za-z0-9]+)*", clean_text))
+            heading_like = (
+                len(block_lines) == 1
+                and len(clean_text) <= 90
+                and word_count <= 12
+                and not clean_text.endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "："))
+            )
+            if not heading_like:
+                continue
+
+            for other_index, other in enumerate(text_blocks):
+                if other_index == index:
+                    continue
+                if other.get("type") != "text" or other.get("is_formula"):
+                    continue
+
+                other_rect = self._block_rect(other)
+                if other_rect.is_empty:
+                    continue
+
+                vertical_gap = other_rect.y0 - rect.y1
+                same_column = (
+                    abs(other_rect.x0 - rect.x0) <= max(font_size * 0.8, 10.0)
+                    and min(rect.x1, other_rect.x1) - max(rect.x0, other_rect.x0) >= block_width * 0.45
+                )
+                if same_column and -1.0 <= vertical_gap <= max(font_size * 1.2, 16.0):
+                    block["is_header_footer_metadata"] = False
+                    break
+
     def _is_marker_heading(self, block: Dict[str, Any]) -> bool:
         text = self._normalize_pdf_text(block.get("text", ""))
         if not text:
@@ -512,6 +914,45 @@ class PDFService:
 
         left_delta = abs(previous_rect.x0 - current_rect.x0)
         if left_delta > max(previous_font_size * 1.2, 24):
+            return False
+
+        previous_text = self._normalize_pdf_text(previous.get("text", ""))
+        current_text = self._normalize_pdf_text(current.get("text", ""))
+        previous_lines = [
+            line for line in previous.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ]
+        current_lines = [
+            line for line in current.get("lines", [])
+            if self._normalize_pdf_text(line.get("text", ""))
+        ]
+        punctuation_end = previous_text.endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "："))
+        current_indent = current_rect.x0 - min(previous_rect.x0, current_rect.x0)
+        previous_width = previous_rect.width
+        combined_width = max(previous_rect.x1, current_rect.x1) - min(previous_rect.x0, current_rect.x0)
+        previous_last_line = previous_lines[-1] if previous_lines else None
+
+        if (
+            previous_lines
+            and current_lines
+            and previous_font_size >= current_font_size * 1.06
+            and previous_width <= combined_width * 0.82
+            and len(previous_lines) == 1
+        ):
+            return False
+
+        if (
+            punctuation_end
+            and current_rect.x0 - previous_rect.x0 >= max(current_font_size * 0.7, 7.5)
+        ):
+            return False
+
+        if (
+            punctuation_end
+            and previous_width <= combined_width * 0.76
+            and previous_last_line is not None
+            and current_rect.x0 <= previous_rect.x0 + max(current_font_size * 0.3, 3.0)
+        ):
             return False
 
         return True
@@ -1289,9 +1730,14 @@ class PDFService:
                 original_rect.height - 12,
                 max(bottom_limit, source_rect.y1 + 2, source_rect.y0 + min_height),
             )
+            use_label_start_x = (
+                not marker
+                and source_line_count <= 2
+                and len(source_text) <= 90
+            )
             translation_start_x = (
                 source_rect.x0
-                if marker
+                if marker or not use_label_start_x
                 else self._translation_start_x(block, source_rect, base_font_size)
             )
 

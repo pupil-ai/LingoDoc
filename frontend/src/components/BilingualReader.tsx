@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@clerk/nextjs';
-import { buildExportUrl, fetchExportPdfBlob } from '@/lib/api';
+import { buildExportUrl, getTranslationResult } from '@/lib/api';
 
 interface BilingualReaderProps {
   taskId: string;
@@ -19,10 +19,8 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
   const [previewError, setPreviewError] = useState('');
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
-  const [previewVersion] = useState(() => Date.now().toString());
 
   useEffect(() => {
-    let objectUrl: string | null = null;
     let isCancelled = false;
 
     async function loadPreview() {
@@ -31,17 +29,13 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
 
       try {
         const token = await getToken({ skipCache: true });
-        const blob = await fetchExportPdfBlob(
-          taskId,
-          `format=pdf&output_type=bilingual&v=${previewVersion}`,
-          token
-        );
-        objectUrl = URL.createObjectURL(
-          blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' })
-        );
+        const result = await getTranslationResult(taskId, false, token);
+        const resolvedPreviewUrl = result.previewUrl ? `${result.previewUrl}#page=1&zoom=page-fit` : null;
 
-        if (!isCancelled) {
-          setPreviewUrl(`${objectUrl}#page=1&zoom=page-fit`);
+        if (!isCancelled && resolvedPreviewUrl) {
+          setPreviewUrl(resolvedPreviewUrl);
+        } else if (!isCancelled) {
+          throw new Error('Preview URL is unavailable.');
         }
       } catch (previewLoadError) {
         if (!isCancelled) {
@@ -59,11 +53,8 @@ export function BilingualReader({ taskId, fileId }: BilingualReaderProps) {
 
     return () => {
       isCancelled = true;
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
     };
-  }, [getToken, previewVersion, taskId]);
+  }, [getToken, taskId]);
 
   const resetPreviewScroll = () => {
     previewContainerRef.current?.scrollTo({ top: 0, left: 0 });

@@ -9,7 +9,6 @@ import { LanguageSelector } from '@/components/LanguageSelector';
 import { ProgressBar } from '@/components/ProgressBar';
 import {
   exportTranslation,
-  fetchExportPdfBlob,
   getMyUsage,
   getOriginalFilePreviewBlob,
   getTranslationProgress,
@@ -250,10 +249,8 @@ function TranslatePageContent() {
   const [isStarting, setIsStarting] = useState(false);
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [originalPreviewObjectUrl, setOriginalPreviewObjectUrl] = useState<string | null>(null);
-  const [previewBlob, setPreviewBlob] = useState<Blob | null>(null);
-  const [previewObjectUrl, setPreviewObjectUrl] = useState<string | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState('');
-  const [previewVersion] = useState(() => Date.now().toString());
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [error, setError] = useState('');
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
@@ -288,10 +285,6 @@ function TranslatePageContent() {
   const isRestoringCompletedResult = Boolean(initialTaskId && isCompletedHistoryEntry) && !result && (isRestoringCompletedTask || isPreparingPreview);
   const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
   const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
-  const previewUrl = useMemo(
-    () => (previewObjectUrl ? `${previewObjectUrl}#page=1&zoom=page-fit` : null),
-    [previewObjectUrl]
-  );
   const isPreviewReady = Boolean(result && previewUrl && !isPreparingPreview && !isPreviewLoading && !previewError);
 
   const statusSummary = useMemo(() => {
@@ -352,29 +345,17 @@ function TranslatePageContent() {
   }, [getToken, isLoaded, isSignedIn]);
 
   const loadPreview = useCallback(
-    async (activeTaskId: string) => {
-      let objectUrl: string | null = null;
+    async (activeTaskId: string, previewPath?: string) => {
       setIsPreviewLoading(true);
       setPreviewError('');
 
       try {
-        const token = await getToken({ skipCache: true });
-        const blob = await fetchExportPdfBlob(
-          activeTaskId,
-          `format=pdf&output_type=bilingual&v=${previewVersion}`,
-          token
-        );
-        const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
-        objectUrl = URL.createObjectURL(pdfBlob);
-        setPreviewBlob(pdfBlob);
-        setPreviewObjectUrl((current) => {
-          if (current) {
-            URL.revokeObjectURL(current);
-          }
-          return objectUrl;
-        });
+        const resolvedPreviewUrl = previewPath ? `${previewPath}#page=1&zoom=page-fit` : null;
+        if (!resolvedPreviewUrl) {
+          throw new Error('Preview URL is unavailable.');
+        }
+        setPreviewUrl(resolvedPreviewUrl);
       } catch (previewLoadError) {
-        setPreviewBlob(null);
         setPreviewError(
           previewLoadError instanceof Error
             ? previewLoadError.message
@@ -383,7 +364,7 @@ function TranslatePageContent() {
         setIsPreviewLoading(false);
       }
     },
-    [getToken, previewVersion]
+    []
   );
 
   const loadOriginalPreview = useCallback(async () => {
@@ -472,7 +453,7 @@ function TranslatePageContent() {
         const resultData = await getTranslationResult(taskId, false, token);
         setResult(resultData);
         setIsPreparingPreview(false);
-        await loadPreview(taskId);
+        await loadPreview(taskId, resultData.previewUrl);
       } else if (progressData.status === 'error') {
         pollErrorCountRef.current = 0;
         setError(progressData.error || 'Translation task failed.');
@@ -506,20 +487,6 @@ function TranslatePageContent() {
       }
     };
   }, [originalPreviewObjectUrl]);
-
-  useEffect(() => {
-    return () => {
-      if (previewObjectUrl) {
-        URL.revokeObjectURL(previewObjectUrl);
-      }
-    };
-  }, [previewObjectUrl]);
-
-  useEffect(() => {
-    if (!previewObjectUrl) {
-      setPreviewBlob(null);
-    }
-  }, [previewObjectUrl]);
 
   useEffect(() => {
     if (!downloadToast || downloadToast.type === 'loading') {
@@ -591,7 +558,7 @@ function TranslatePageContent() {
           setTaskId(initialTaskId);
           const resultData = await getTranslationResult(initialTaskId, false, token);
           setResult(resultData);
-          await loadPreview(initialTaskId);
+          await loadPreview(initialTaskId, resultData.previewUrl);
         } else if (progressData.status === 'processing') {
           setTaskId(initialTaskId);
         } else {
@@ -621,10 +588,7 @@ function TranslatePageContent() {
     });
     try {
       const token = await getToken({ skipCache: true });
-      const blob =
-        type === 'bilingual' && previewBlob
-          ? previewBlob
-          : await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
+      const blob = await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
       const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
       const objectUrl = URL.createObjectURL(pdfBlob);
       const link = document.createElement('a');
@@ -761,14 +725,14 @@ function TranslatePageContent() {
         <PreviewPlaceholder
           title={
             isRestoringCompletedResult
-              ? 'Loading translated document'
+              ? 'Translation completed'
               : isStartingTranslation
                 ? 'Translating your document'
                 : 'Ready to translate'
           }
           description={
             isRestoringCompletedResult
-              ? 'Preparing your translated PDF...'
+              ? 'Preparing preview PDF...'
               : isStartingTranslation
               ? 'Please wait while we translate your PDF...'
               : 'Select your target language and click the "Translate" button above to start translating your document.'
@@ -833,8 +797,8 @@ function TranslatePageContent() {
         />
       ) : !previewUrl ? (
         <PreviewPlaceholder
-          title="Loading translated document"
-          description="Preparing your translated PDF..."
+          title="Translation completed"
+          description="Preparing preview PDF..."
           originalPreviewUrl={originalPreviewUrl}
           processing
           error={previewError}
@@ -846,8 +810,8 @@ function TranslatePageContent() {
               {(isPreparingPreview || isPreviewLoading || previewError) && (
                 <div className="absolute inset-0 z-10">
                   <PreviewPlaceholder
-                    title="Loading translated document"
-                    description="Preparing your translated PDF..."
+                    title="Translation completed"
+                    description="Preparing preview PDF..."
                     originalPreviewUrl={originalPreviewUrl}
                     processing={!previewError}
                     error={previewError}

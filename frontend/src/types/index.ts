@@ -51,6 +51,7 @@ export interface TranslationResult {
   success: boolean;
   pages?: PageResult[];
   fileId?: string;
+  previewUrl?: string;
   totalPages?: number;
   translatedPages?: number;
   isPartial?: boolean;

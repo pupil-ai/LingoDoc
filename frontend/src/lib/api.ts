@@ -137,24 +137,6 @@ export function buildExportUrl(taskId: string, params: string): string {
   return buildUrl(`/api/export/${taskId}?${params}`);
 }
 
-export async function fetchExportPdfBlob(
-  taskId: string,
-  params: string,
-  token?: string | null
-): Promise<Blob> {
-  const response = await fetch(buildExportUrl(taskId, params), {
-    cache: 'no-store',
-    headers: buildAuthHeaders(token),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(errorText || 'Failed to load PDF');
-  }
-
-  return response.blob();
-}
-
 export async function getOriginalFilePreviewBlob(
   fileId: string,
   token?: string | null,

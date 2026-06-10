@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import time
+from urllib.parse import urlencode
 
 from app.services.pdf_service import PDFService
 from app.services.translate_service import TranslationServiceFactory, safe_print
@@ -20,7 +21,7 @@ from app.services.plan_service import (
     get_plan_limits,
     get_translatable_page_count,
 )
-from app.api.auth import CurrentUser, get_current_user
+from app.api.auth import CurrentUser, get_current_user, get_optional_current_user
 
 router = APIRouter()
 
@@ -31,11 +32,83 @@ TRANSLATION_BATCH_MAX_CHARS = 5000
 TRANSLATION_BATCH_CONCURRENCY = 2
 PAGE_TRANSLATION_CONCURRENCY = 3
 PAGE_RETRY_LIMIT = 2
+PREVIEW_URL_TTL_SECONDS = 15 * 60
 
 class TranslationRequest(BaseModel):
     fileId: str
     sourceLang: str
     targetLang: str
+
+
+def _get_preview_url_secret() -> str:
+    return (
+        os.getenv("PREVIEW_URL_SECRET", "").strip()
+        or os.getenv("PADDLE_WEBHOOK_SECRET", "").strip()
+        or os.getenv("R2_SECRET_ACCESS_KEY", "").strip()
+    )
+
+
+def _build_preview_signature(
+    *,
+    task_id: str,
+    user_id: str,
+    format: str,
+    output_type: str,
+    expires_at: int,
+) -> str:
+    secret = _get_preview_url_secret()
+    if not secret:
+        raise HTTPException(status_code=503, detail="Preview URL signing is not configured")
+
+    payload = f"{task_id}:{user_id}:{format}:{output_type}:{expires_at}"
+    return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _build_signed_preview_query(
+    *,
+    task_id: str,
+    user_id: str,
+    format: str = "pdf",
+    output_type: str = "bilingual",
+) -> str:
+    expires_at = int(time.time()) + PREVIEW_URL_TTL_SECONDS
+    signature = _build_preview_signature(
+        task_id=task_id,
+        user_id=user_id,
+        format=format,
+        output_type=output_type,
+        expires_at=expires_at,
+    )
+    return urlencode({
+        "format": format,
+        "output_type": output_type,
+        "preview_expires": expires_at,
+        "preview_signature": signature,
+    })
+
+
+def _verify_signed_preview_request(
+    *,
+    task_id: str,
+    task_owner_id: str,
+    format: str,
+    output_type: str,
+    preview_expires: Optional[int],
+    preview_signature: Optional[str],
+) -> bool:
+    if preview_expires is None or not preview_signature:
+        return False
+    if preview_expires < int(time.time()):
+        return False
+
+    expected_signature = _build_preview_signature(
+        task_id=task_id,
+        user_id=task_owner_id,
+        format=format,
+        output_type=output_type,
+        expires_at=preview_expires,
+    )
+    return hmac.compare_digest(expected_signature, preview_signature)
 
 
 def _parse_paddle_signature(signature_header: str) -> Dict[str, str]:
@@ -353,7 +426,7 @@ async def _translate_page_blocks(
             block["translatedText"] = ""
         elif not pdf_service.is_translatable_text_block(block):
             block["translatedText"] = ""
-            block["is_formula"] = True
+            block["is_formula"] = block.get("is_formula", False)
         elif block.get("is_header_footer_metadata"):
             block["translatedText"] = ""
         else:
@@ -782,13 +855,14 @@ async def _legacy_translate_pdf_task_slow(
                     })
                 elif not pdf_service.is_translatable_text_block(block):
                     translated_blocks.append({
-                        "type": "formula",
+                        "type": block.get("type", "text"),
                         "bbox": block["bbox"],
                         "text": block["text"],
                         "translatedText": "",
                         "font_size": block.get("font_size"),
                         "lines": block.get("lines", []),
-                        "is_formula": True,
+                        "is_formula": block.get("is_formula", False),
+                        "is_chart_text": block.get("is_chart_text", False),
                         "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
                     })
                 elif block.get("is_header_footer_metadata"):
@@ -816,6 +890,7 @@ async def _legacy_translate_pdf_task_slow(
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
                             "is_formula": False,
+                            "is_chart_text": block.get("is_chart_text", False),
                             "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
                         })
                     except Exception as e:
@@ -827,7 +902,8 @@ async def _legacy_translate_pdf_task_slow(
                             "translatedText": block["text"],
                             "font_size": block.get("font_size"),
                             "lines": block.get("lines", []),
-                            "is_formula": False,
+                            "is_formula": block.get("is_formula", False),
+                            "is_chart_text": block.get("is_chart_text", False),
                             "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
                         })
             
@@ -1163,6 +1239,9 @@ async def get_result(
         response_result = {key: value for key, value in result.items() if key != "userId"}
         if not include_pages:
             response_result.pop("pages", None)
+        response_result["previewUrl"] = (
+            f"/api/export/{task_id}?{_build_signed_preview_query(task_id=task_id, user_id=current_user.id)}"
+        )
         return JSONResponse({
             "success": True,
             **response_result,
@@ -1179,11 +1258,11 @@ async def export_translation(
     format: str = "text",
     output_type: str = "translated",
     download: bool = False,
-    current_user: CurrentUser = Depends(get_current_user),
+    preview_expires: Optional[int] = None,
+    preview_signature: Optional[str] = None,
+    current_user: Optional[CurrentUser] = Depends(get_optional_current_user),
 ):
     try:
-        _ensure_task_owner(task_id, current_user.id)
-
         if format == "pdf_bilingual":
             format = "pdf"
             output_type = "bilingual"
@@ -1192,8 +1271,27 @@ async def export_translation(
             output_type = "translated"
 
         result = pdf_service.load_translation_result(task_id)
-        if result.get("userId") != current_user.id:
-            _raise_not_found()
+        task_owner_id = str(result.get("userId") or "")
+
+        has_signed_preview_access = (
+            not download
+            and format == "pdf"
+            and _verify_signed_preview_request(
+                task_id=task_id,
+                task_owner_id=task_owner_id,
+                format=format,
+                output_type=output_type,
+                preview_expires=preview_expires,
+                preview_signature=preview_signature,
+            )
+        )
+
+        if current_user is not None:
+            if task_owner_id != current_user.id:
+                _raise_not_found()
+        elif not has_signed_preview_access:
+            raise HTTPException(status_code=401, detail="Missing Authorization header")
+
         file_id = result.get("fileId") or task_id
         
         if format == "text":
