@@ -1,5 +1,6 @@
 import type {
   DeleteFileResponse,
+  ExportJobResponse,
   MyFilesResponse,
   TranslationProgress,
   TranslationRequest,
@@ -108,33 +109,38 @@ export async function getTranslationResult(
   return parseJsonResponse<TranslationResult>(response, 'Failed to get translation result');
 }
 
-export async function exportTranslation(
-  taskId: string,
-  format: 'pdf_bilingual' | 'pdf_translated' | 'text',
-  token?: string | null
-): Promise<Blob> {
-  const params =
-    format === 'pdf_bilingual'
-      ? 'format=pdf&output_type=bilingual&download=true'
-      : format === 'pdf_translated'
-        ? 'format=pdf&output_type=translated&download=true'
-        : 'format=text';
-
-  const response = await fetch(buildExportUrl(taskId, `${params}&v=${Date.now()}`), {
-    cache: 'no-store',
-    headers: buildAuthHeaders(token),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(errorText || 'Failed to export file');
-  }
-
-  return response.blob();
-}
-
 export function buildExportUrl(taskId: string, params: string): string {
   return buildUrl(`/api/export/${taskId}?${params}`);
+}
+
+export async function startExportJob(
+  taskId: string,
+  outputType: 'translated' | 'bilingual',
+  token?: string | null
+): Promise<ExportJobResponse> {
+  const response = await fetch(buildUrl(`/api/export/${taskId}/jobs`), {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAuthHeaders(token),
+    },
+    body: JSON.stringify({ outputType }),
+  });
+
+  return parseJsonResponse<ExportJobResponse>(response, 'Failed to start export job');
+}
+
+export async function getExportJob(
+  taskId: string,
+  outputType: 'translated' | 'bilingual',
+  token?: string | null
+): Promise<ExportJobResponse> {
+  const response = await fetch(buildUrl(`/api/export/${taskId}/jobs/${outputType}`), {
+    headers: buildAuthHeaders(token),
+    cache: 'no-store',
+  });
+
+  return parseJsonResponse<ExportJobResponse>(response, 'Failed to get export job status');
 }
 
 export async function getOriginalFilePreviewBlob(
@@ -150,6 +156,24 @@ export async function getOriginalFilePreviewBlob(
 
   if (!response.ok) {
     throw new Error('Failed to load original preview image');
+  }
+
+  return response.blob();
+}
+
+export async function getTranslationPagePreviewBlob(
+  taskId: string,
+  token?: string | null,
+  page = 1,
+  width = 1800
+): Promise<Blob> {
+  const response = await fetch(buildUrl(`/api/translate/${taskId}/pages/${page}/preview?width=${width}`), {
+    headers: buildAuthHeaders(token),
+    cache: 'force-cache',
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to load translated page preview');
   }
 
   return response.blob();

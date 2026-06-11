@@ -14,6 +14,37 @@ LingoDoc is a PDF translation tool. It uploads PDFs, translates text, previews b
 - Translated text should follow the source block style as closely as possible: position, size, color, boldness, alignment, and spacing.
 - Avoid unlimited font shrinking. Prefer readable text, controlled wrapping, and safe overflow handling.
 
+## Current Refactor Goal
+
+The current priority is to refactor the PDF translation pipeline toward page-based, scalable, approximately faithful rendering instead of patching isolated layout heuristics.
+
+Primary goals:
+
+- PDF output should be approximately faithful to the original layout, with no obvious layout errors, overlaps, blank pages, corrupted text, or mixed paragraphs.
+- Translation speed for normal documents with dozens of pages should be acceptable for interactive use; very large documents such as 3000-page PDFs may be long-running asynchronous jobs.
+- Preview loading must not depend on generating or downloading the full bilingual PDF.
+- Translated pages should become previewable page-by-page as soon as page results are available.
+- Full PDF export should be a separate rendering/export job, not the first-preview path.
+- Prefer page-level data, page-level rendering, and page-level caching over whole-document blocking work.
+- Avoid continuing to add one-off rules to `pdf_service.py` when the underlying problem is missing layout structure or pipeline boundaries.
+
+Architecture direction:
+
+- Separate PDF analysis, layout classification, translation orchestration, page preview rendering, and full PDF export into distinct modules when making substantial changes.
+- Build or preserve an intermediate page layout representation before translation.
+- Classify text regions before translation: body, title, header, footer, margin, figure, table, formula, decorative, or unknown.
+- Translate only appropriate text regions; preserve or skip formulas, decorative symbols, repeated marginalia, and non-content running headers/footers unless explicitly required.
+- Use collision-aware layout when placing translated text. Do not allow translated text to overlap adjacent regions.
+- Prefer readable text and controlled wrapping over aggressive font shrinking.
+
+Performance direction:
+
+- Use configurable translation concurrency and batching.
+- Use translation caches for repeated text blocks.
+- Avoid reopening and reparsing the same PDF page multiple times when one pass can collect the needed data.
+- Avoid loading huge translation JSON payloads in the frontend.
+- Avoid fetching full PDF blobs into frontend memory before download when a streamed or signed download URL can be used.
+
 ## PDF Text Layer Notes
 
 - Be careful with PDF selection behavior. Hidden text layers can still be selected even if they are covered visually.
@@ -36,6 +67,9 @@ Before finishing PDF-related changes:
 - Run `python -m py_compile backend/app/services/pdf_service.py backend/app/api/routes.py backend/app/services/translate_service.py`.
 - If frontend code changes, run `npx.cmd tsc --noEmit` from `frontend`.
 - Generate or export a bilingual PDF and inspect layout, text selection, and downloaded PDF behavior.
+- For PDF pipeline refactors, test first preview load time separately from full PDF export time.
+- When fixtures are available, test at least one multi-column academic PDF, one document with headers/footers, and one document with figures/tables.
+- On Windows, do not pipe inline scripts containing raw CJK or other non-ASCII test text through PowerShell. Use Unicode escapes, a UTF-8 file, or another encoding-safe path so test data is not silently replaced with `?`.
 
 ## Safety
 

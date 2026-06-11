@@ -4,15 +4,18 @@ import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { ArrowLeftRight, CheckCircle2, Download, FileText, Info, Loader2, X } from 'lucide-react';
+import { ArrowLeftRight, CheckCircle2, ChevronLeft, ChevronRight, Download, FileText, Info, Loader2, Minus, Plus, X } from 'lucide-react';
 import { LanguageSelector } from '@/components/LanguageSelector';
 import { ProgressBar } from '@/components/ProgressBar';
 import {
-  exportTranslation,
+  buildUrl,
+  getExportJob,
   getMyUsage,
   getOriginalFilePreviewBlob,
+  getTranslationPagePreviewBlob,
   getTranslationProgress,
   getTranslationResult,
+  startExportJob,
   startTranslation,
 } from '@/lib/api';
 import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
@@ -60,6 +63,12 @@ function labelForLang(code: string): string {
     ru: 'Russian',
   };
   return labels[code] || code.toUpperCase();
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function PreviewPlaceholder({
@@ -221,6 +230,114 @@ function DownloadToast({
   );
 }
 
+function TranslatedPagePreview({
+  imageUrl,
+  page,
+  totalPages,
+  zoom,
+  loading,
+  error,
+  onPageChange,
+  onZoomChange,
+}: {
+  imageUrl: string | null;
+  page: number;
+  totalPages: number;
+  zoom: number;
+  loading: boolean;
+  error: string;
+  onPageChange: (page: number) => void;
+  onZoomChange: (zoom: number) => void;
+}) {
+  const canGoBack = page > 1 && !loading;
+  const canGoForward = page < totalPages && !loading;
+  const safeTotalPages = Math.max(totalPages, 1);
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-slate-100">
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onPageChange(page - 1)}
+            disabled={!canGoBack}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+            aria-label="Previous page"
+          >
+            <ChevronLeft className="size-4" strokeWidth={2} />
+          </button>
+          <div className="min-w-[112px] text-center text-[13px] font-medium text-slate-600">
+            {page} / {safeTotalPages}
+          </div>
+          <button
+            type="button"
+            onClick={() => onPageChange(page + 1)}
+            disabled={!canGoForward}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+            aria-label="Next page"
+          >
+            <ChevronRight className="size-4" strokeWidth={2} />
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onZoomChange(Math.max(0.7, Number((zoom - 0.1).toFixed(2))))}
+            disabled={zoom <= 0.7}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+            aria-label="Zoom out"
+          >
+            <Minus className="size-4" strokeWidth={2} />
+          </button>
+          <div className="min-w-[52px] text-center text-[12px] font-semibold text-slate-500">{Math.round(zoom * 100)}%</div>
+          <button
+            type="button"
+            onClick={() => onZoomChange(Math.min(1.8, Number((zoom + 0.1).toFixed(2))))}
+            disabled={zoom >= 1.8}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+            aria-label="Zoom in"
+          >
+            <Plus className="size-4" strokeWidth={2} />
+          </button>
+        </div>
+      </div>
+
+      <div className="relative min-h-0 flex-1 overflow-auto">
+        {loading ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 backdrop-blur-sm">
+            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-600 shadow-xl">
+              <Loader2 className="size-4 animate-spin" strokeWidth={2} />
+              Rendering page preview...
+            </div>
+          </div>
+        ) : null}
+
+        {error ? (
+          <div className="flex h-full items-center justify-center px-6 text-center">
+            <div className="max-w-[420px] rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-[13px] font-medium leading-6 text-red-700">
+              {error}
+            </div>
+          </div>
+        ) : imageUrl ? (
+          <div className="flex min-h-full justify-center px-6 py-6">
+            <img
+              src={imageUrl}
+              alt={`Translated preview page ${page}`}
+              style={{ width: `${Math.round(100 * zoom)}%`, maxWidth: `${Math.round(1800 * zoom)}px` }}
+              className="h-auto self-start border border-slate-200 bg-white shadow-sm"
+            />
+          </div>
+        ) : (
+          <div className="flex h-full items-center justify-center text-[13px] font-medium text-slate-400">
+            Preparing page preview...
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TranslatePageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -250,6 +367,10 @@ function TranslatePageContent() {
   const [isPreparingPreview, setIsPreparingPreview] = useState(false);
   const [originalPreviewObjectUrl, setOriginalPreviewObjectUrl] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [previewPageImageUrl, setPreviewPageImageUrl] = useState<string | null>(null);
+  const previewPageImageUrlRef = useRef<string | null>(null);
+  const [previewPage, setPreviewPage] = useState(1);
+  const [previewZoom, setPreviewZoom] = useState(1);
   const [previewError, setPreviewError] = useState('');
   const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [error, setError] = useState('');
@@ -285,7 +406,8 @@ function TranslatePageContent() {
   const isRestoringCompletedResult = Boolean(initialTaskId && isCompletedHistoryEntry) && !result && (isRestoringCompletedTask || isPreparingPreview);
   const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
   const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
-  const isPreviewReady = Boolean(result && previewUrl && !isPreparingPreview && !isPreviewLoading && !previewError);
+  const previewPageCount = Math.max(result?.translatedPages || result?.pages?.length || progress.translatedPages || progress.requestedPages || knownTotalPages || 1, 1);
+  const isPreviewReady = Boolean(result && previewPageImageUrl && !isPreparingPreview && !previewError);
 
   const statusSummary = useMemo(() => {
     if (!usage) {
@@ -344,27 +466,48 @@ function TranslatePageContent() {
     }
   }, [getToken, isLoaded, isSignedIn]);
 
-  const loadPreview = useCallback(
-    async (activeTaskId: string, previewPath?: string) => {
+  const loadPreviewPage = useCallback(
+    async (activeTaskId: string, pageNumber: number) => {
       setIsPreviewLoading(true);
       setPreviewError('');
 
       try {
-        const resolvedPreviewUrl = previewPath ? `${previewPath}#page=1&zoom=page-fit` : null;
-        if (!resolvedPreviewUrl) {
-          throw new Error('Preview URL is unavailable.');
+        const token = await getToken({ skipCache: true });
+        const blob = await getTranslationPagePreviewBlob(activeTaskId, token, pageNumber);
+        const imageBlob = blob.type.startsWith('image/') ? blob : new Blob([blob], { type: 'image/png' });
+        const objectUrl = URL.createObjectURL(imageBlob);
+
+        if (previewPageImageUrlRef.current) {
+          URL.revokeObjectURL(previewPageImageUrlRef.current);
         }
-        setPreviewUrl(resolvedPreviewUrl);
+        previewPageImageUrlRef.current = objectUrl;
+        setPreviewPageImageUrl(objectUrl);
+        setPreviewPage(pageNumber);
       } catch (previewLoadError) {
+        if (previewPageImageUrlRef.current) {
+          URL.revokeObjectURL(previewPageImageUrlRef.current);
+          previewPageImageUrlRef.current = null;
+        }
+        setPreviewPageImageUrl(null);
         setPreviewError(
           previewLoadError instanceof Error
             ? previewLoadError.message
             : 'Failed to load preview. Please try downloading the file instead.'
         );
+      } finally {
         setIsPreviewLoading(false);
       }
     },
-    []
+    [getToken]
+  );
+
+  const loadPreview = useCallback(
+    async (activeTaskId: string, previewPath?: string) => {
+      setPreviewUrl(previewPath || activeTaskId);
+      setPreviewPage(1);
+      await loadPreviewPage(activeTaskId, 1);
+    },
+    [loadPreviewPage]
   );
 
   const loadOriginalPreview = useCallback(async () => {
@@ -387,6 +530,31 @@ function TranslatePageContent() {
       setOriginalPreviewObjectUrl(null);
     }
   }, [fileId, getToken, isLoaded, isSignedIn]);
+
+  const handlePreviewPageChange = useCallback(
+    (nextPage: number) => {
+      if (!taskId || isPreviewLoading) {
+        return;
+      }
+
+      const safePage = Math.min(Math.max(nextPage, 1), previewPageCount);
+      if (safePage === previewPage) {
+        return;
+      }
+
+      void loadPreviewPage(taskId, safePage);
+    },
+    [isPreviewLoading, loadPreviewPage, previewPage, previewPageCount, taskId]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (previewPageImageUrlRef.current) {
+        URL.revokeObjectURL(previewPageImageUrlRef.current);
+        previewPageImageUrlRef.current = null;
+      }
+    };
+  }, []);
 
   const startTranslate = async () => {
     if (!fileId) {
@@ -588,11 +756,38 @@ function TranslatePageContent() {
     });
     try {
       const token = await getToken({ skipCache: true });
-      const blob = await exportTranslation(taskId, type === 'bilingual' ? 'pdf_bilingual' : 'pdf_translated', token);
-      const pdfBlob = blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' });
-      const objectUrl = URL.createObjectURL(pdfBlob);
+      let exportJob = await startExportJob(taskId, type, token);
+      if (exportJob.status === 'error') {
+        throw new Error(exportJob.error || 'Failed to prepare export file.');
+      }
+
+      const maxPolls = 180;
+      for (let attempt = 0; exportJob.status !== 'ready' && attempt < maxPolls; attempt += 1) {
+        setDownloadToast({
+          type: 'loading',
+          message: type === 'bilingual' ? 'Rendering bilingual PDF...' : 'Rendering translation-only PDF...',
+        });
+        await wait(1000);
+        exportJob = await getExportJob(taskId, type, token);
+        if (exportJob.status === 'error') {
+          throw new Error(exportJob.error || 'Failed to prepare export file.');
+        }
+      }
+
+      if (exportJob.status !== 'ready') {
+        throw new Error('Export is still rendering. Please try again in a moment.');
+      }
+
+      setDownloadToast({
+        type: 'loading',
+        message: 'Starting download...',
+      });
+      if (!exportJob.downloadUrl) {
+        throw new Error('Download URL is not ready. Please try again in a moment.');
+      }
+
       const link = document.createElement('a');
-      link.href = objectUrl;
+      link.href = buildUrl(exportJob.downloadUrl);
       link.download = `${displayFileName.replace(/\.pdf$/i, '')}_${type}.pdf`;
       document.body.appendChild(link);
       link.click();
@@ -600,11 +795,10 @@ function TranslatePageContent() {
         if (link.parentNode) {
           link.parentNode.removeChild(link);
         }
-        URL.revokeObjectURL(objectUrl);
       }, 0);
       setDownloadToast({
         type: 'success',
-        message: 'Download started.',
+        message: 'Download sent to browser.',
       });
     } catch (downloadError) {
       setDownloadToast({
@@ -804,34 +998,16 @@ function TranslatePageContent() {
           error={previewError}
         />
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50">
-          <div className="w-full min-h-0 flex-1">
-            <div className="relative h-full w-full overflow-hidden bg-white">
-              {(isPreparingPreview || isPreviewLoading || previewError) && (
-                <div className="absolute inset-0 z-10">
-                  <PreviewPlaceholder
-                    title="Translation completed"
-                    description="Preparing preview PDF..."
-                    originalPreviewUrl={originalPreviewUrl}
-                    processing={!previewError}
-                    error={previewError}
-                    overlay
-                  />
-                </div>
-              )}
-
-              <iframe
-                key={previewUrl}
-                src={previewUrl}
-                title="Bilingual file preview"
-                onLoad={() => setIsPreviewLoading(false)}
-                className={`h-full w-full transition-opacity duration-200 ${
-                  isPreparingPreview || isPreviewLoading || previewError ? 'opacity-0' : 'opacity-100'
-                }`}
-              />
-            </div>
-          </div>
-        </div>
+        <TranslatedPagePreview
+          imageUrl={previewPageImageUrl}
+          page={previewPage}
+          totalPages={previewPageCount}
+          zoom={previewZoom}
+          loading={isPreparingPreview || isPreviewLoading}
+          error={previewError}
+          onPageChange={handlePreviewPageChange}
+          onZoomChange={setPreviewZoom}
+        />
       )}
 
       <div className="border-t border-slate-100 bg-white px-4 text-[12px] text-slate-400">

@@ -24,7 +24,7 @@ export interface TranslationResponse {
 }
 
 export interface TranslationProgress {
-  status: 'processing' | 'completed' | 'error';
+  status: 'processing' | 'completed' | 'error' | 'recoverable';
   progress: number;
   processedPages: number;
   totalPages: number;
@@ -59,6 +59,21 @@ export interface TranslationResult {
   pageLimit?: number;
   usageMonth?: string;
   monthlyPageQuota?: number;
+}
+
+export interface ExportJobResponse {
+  success: boolean;
+  status: 'missing' | 'queued' | 'rendering' | 'ready' | 'error';
+  taskId: string;
+  outputType: 'translated' | 'bilingual';
+  downloadUrl?: string;
+  elapsedMs?: number;
+  sourceBytes?: number;
+  exportBytes?: number;
+  sizeRatio?: number;
+  sizeWarnRatio?: number;
+  sizeWarning?: boolean;
+  error?: string;
 }
 
 export interface MyFileRecord {

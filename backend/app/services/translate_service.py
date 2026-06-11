@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 import json
 import os
+import re
 import sys
 
 import aiohttp
@@ -36,6 +37,15 @@ class TranslationService(ABC):
             translations.append(await self.translate(text, source_lang, target_lang))
         return translations
 
+    async def translate_structured_batch(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+    ) -> List[str]:
+        texts = [str(item.get("text") or "") for item in items]
+        return await self.translate_batch(texts, source_lang, target_lang)
+
 
 class AioHttpTranslationService(TranslationService):
     def __init__(self) -> None:
@@ -66,6 +76,85 @@ def _build_translation_messages(payload: str, source_lang: str, target_lang: str
         },
         {"role": "user", "content": payload},
     ]
+
+
+def _extract_json_array(raw_response: str) -> Any:
+    text = raw_response.strip()
+    fenced_match = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced_match:
+        text = fenced_match.group(1).strip()
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("[")
+        end = text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(text[start:end + 1])
+
+
+def _build_structured_batch_payload(items: List[Dict[str, Any]]) -> str:
+    serializable_items = []
+    for index, item in enumerate(items):
+        serializable_items.append({
+            "id": index,
+            "text": str(item.get("text") or ""),
+            "role": str(item.get("role") or "body"),
+            "lineCount": int(item.get("lineCount") or 1),
+            "leadingMarker": str(item.get("leadingMarker") or ""),
+            "endsWithSentencePunctuation": bool(item.get("endsWithSentencePunctuation")),
+        })
+    return json.dumps(serializable_items, ensure_ascii=False)
+
+
+def _build_structured_batch_messages(
+    items: List[Dict[str, Any]],
+    source_lang: str,
+    target_lang: str,
+) -> List[Dict[str, str]]:
+    payload = _build_structured_batch_payload(items)
+    return _build_translation_messages(
+        (
+            "Translate every item in the JSON array independently.\n"
+            "Return JSON only in exactly this shape: "
+            '[{"id":0,"translatedText":"..."}, ...].\n'
+            "Do not omit any item. Keep ids unchanged.\n"
+            "Do not merge adjacent items, split one item into multiple items, or move content between items.\n"
+            "Preserve each item's role: headings should remain concise headings; body text should remain one paragraph unless the source contains explicit paragraph breaks.\n"
+            "Preserve leadingMarker exactly at the start of translatedText when it is non-empty.\n"
+            "Preserve placeholder tokens like [[REF0]] exactly; do not translate, remove, reorder, or alter them.\n"
+            "Preserve numeric expressions, comparison operators, percentages, ranges, bullets, numbering, citations, figure/table labels, and symbols exactly in meaning and local order.\n"
+            "Do not add explanations, notes, glosses, markdown, or extra line breaks.\n"
+            f"Input JSON:\n{payload}"
+        ),
+        source_lang,
+        target_lang,
+    )
+
+
+def _parse_batch_translations(raw_response: str, expected_count: int) -> List[str]:
+    try:
+        parsed = _extract_json_array(raw_response)
+    except json.JSONDecodeError as exc:
+        raise Exception(f"Batch translation returned invalid JSON: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise Exception("Batch translation response must be a JSON array")
+
+    translations_by_id: Dict[int, str] = {}
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        translated_text = item.get("translatedText")
+        if isinstance(item_id, int) and isinstance(translated_text, str):
+            translations_by_id[item_id] = translated_text.strip()
+
+    if len(translations_by_id) != expected_count:
+        raise Exception("Batch translation response is missing items")
+
+    return [translations_by_id[index] for index in range(expected_count)]
 
 
 class DeepLService(AioHttpTranslationService):
@@ -148,6 +237,28 @@ class OpenAIService(AioHttpTranslationService):
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         return await self._request_completion(_build_translation_messages(text, source_lang, target_lang))
 
+    async def translate_structured_batch(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+    ) -> List[str]:
+        if not items:
+            return []
+        raw_response = await self._request_completion(
+            _build_structured_batch_messages(items, source_lang, target_lang)
+        )
+        return _parse_batch_translations(raw_response, len(items))
+
+    async def translate_batch(
+        self,
+        texts: List[str],
+        source_lang: str,
+        target_lang: str,
+    ) -> List[str]:
+        items = [{"text": text, "role": "body"} for text in texts]
+        return await self.translate_structured_batch(items, source_lang, target_lang)
+
     def get_supported_languages(self) -> List[str]:
         return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
 
@@ -212,53 +323,27 @@ class OfoxAIService(AioHttpTranslationService):
         source_lang: str,
         target_lang: str,
     ) -> List[str]:
-        if not texts:
+        items = [{"text": text, "role": "body"} for text in texts]
+        return await self.translate_structured_batch(items, source_lang, target_lang)
+
+    async def translate_structured_batch(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+    ) -> List[str]:
+        if not items:
             return []
 
         api_key, base_url, model = self._get_config()
-        payload = json.dumps(
-            [{"id": index, "text": text} for index, text in enumerate(texts)],
-            ensure_ascii=False,
-        )
-        messages = _build_translation_messages(
-            (
-                "Translate every item in the JSON array.\n"
-                "Return JSON only in exactly this shape: "
-                '[{"id":0,"translatedText":"..."}, ...].\n'
-                "Do not omit any item. Keep ids unchanged.\n"
-                f"Input JSON:\n{payload}"
-            ),
-            source_lang,
-            target_lang,
-        )
+        messages = _build_structured_batch_messages(items, source_lang, target_lang)
         raw_response = await self._request_completion(
             messages,
             api_key=api_key,
             base_url=base_url,
             model=model,
         )
-
-        try:
-            parsed = json.loads(raw_response)
-        except json.JSONDecodeError as exc:
-            raise Exception(f"Batch translation returned invalid JSON: {exc}") from exc
-
-        if not isinstance(parsed, list):
-            raise Exception("Batch translation response must be a JSON array")
-
-        translations_by_id: Dict[int, str] = {}
-        for item in parsed:
-            if not isinstance(item, dict):
-                continue
-            item_id = item.get("id")
-            translated_text = item.get("translatedText")
-            if isinstance(item_id, int) and isinstance(translated_text, str):
-                translations_by_id[item_id] = translated_text.strip()
-
-        if len(translations_by_id) != len(texts):
-            raise Exception("Batch translation response is missing items")
-
-        return [translations_by_id[index] for index in range(len(texts))]
+        return _parse_batch_translations(raw_response, len(items))
 
     def get_supported_languages(self) -> List[str]:
         return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
@@ -269,21 +354,7 @@ class MockTranslationService(TranslationService):
         if source_lang == target_lang:
             return text
 
-        mock_translations = {
-            "Hello": {"zh": "你好", "ja": "こんにちは", "ko": "안녕하세요"},
-            "World": {"zh": "世界", "ja": "世界", "ko": "세계"},
-            "Welcome": {"zh": "欢迎", "ja": "ようこそ", "ko": "환영합니다"},
-            "Thank you": {"zh": "谢谢", "ja": "ありがとうございます", "ko": "감사합니다"},
-        }
-
-        for original, translations in mock_translations.items():
-            if original in text:
-                text = text.replace(original, translations.get(target_lang, f"[{target_lang}: {original}]"))
-
-        if text not in mock_translations:
-            text = f"[{target_lang}: {text}]"
-
-        return text
+        return f"[{target_lang}: {text}]"
 
     def get_supported_languages(self) -> List[str]:
         return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]

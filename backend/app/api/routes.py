@@ -8,10 +8,12 @@ import os
 import hashlib
 import hmac
 import json
+import re
 import time
 from urllib.parse import urlencode
 
 from app.services.pdf_service import PDFService
+from app.services.pdf_quality_service import build_pdf_quality_report
 from app.services.translate_service import TranslationServiceFactory, safe_print
 from app.services.db_service import db_service
 from app.services.storage_service import storage_service
@@ -27,17 +29,124 @@ router = APIRouter()
 
 pdf_service = PDFService()
 translation_tasks: Dict[str, Dict[str, Any]] = {}
-TRANSLATION_BATCH_MAX_BLOCKS = 12
-TRANSLATION_BATCH_MAX_CHARS = 5000
-TRANSLATION_BATCH_CONCURRENCY = 2
-PAGE_TRANSLATION_CONCURRENCY = 3
-PAGE_RETRY_LIMIT = 2
+export_tasks: Dict[str, Dict[str, Any]] = {}
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 100) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(min(value, maximum), minimum)
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.1, maximum: float = 100.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(min(value, maximum), minimum)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "off", "no"}
+
+
+TRANSLATION_BATCH_MAX_BLOCKS = _env_int("TRANSLATION_BATCH_MAX_BLOCKS", 20, minimum=1, maximum=80)
+TRANSLATION_BATCH_MAX_CHARS = _env_int("TRANSLATION_BATCH_MAX_CHARS", 8000, minimum=500, maximum=30000)
+TRANSLATION_BATCH_CONCURRENCY = _env_int("TRANSLATION_BATCH_CONCURRENCY", 3, minimum=1, maximum=20)
+TRANSLATION_FALLBACK_CONCURRENCY = _env_int("TRANSLATION_FALLBACK_CONCURRENCY", 3, minimum=1, maximum=12)
+PAGE_TRANSLATION_CONCURRENCY = _env_int("PAGE_TRANSLATION_CONCURRENCY", 6, minimum=1, maximum=50)
+PAGE_RETRY_LIMIT = _env_int("PAGE_RETRY_LIMIT", 2, minimum=0, maximum=5)
+EXPORT_SIZE_WARN_RATIO = _env_float("EXPORT_SIZE_WARN_RATIO", 2.2, minimum=1.0, maximum=20.0)
+AUTO_PREPARE_EXPORTS = _env_bool("AUTO_PREPARE_EXPORTS", True)
+AUTO_PREPARE_EXPORT_TYPES = tuple(
+    output_type
+    for output_type in (
+        item.strip().lower()
+        for item in os.getenv("AUTO_PREPARE_EXPORT_TYPES", "bilingual,translated").split(",")
+    )
+    if output_type in {"bilingual", "translated"}
+)
 PREVIEW_URL_TTL_SECONDS = 15 * 60
+
+REFERENCE_SUPERSCRIPT_CHARS = "\u2070\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079"
+REFERENCE_MARKER_RE = re.compile(
+    rf"[{REFERENCE_SUPERSCRIPT_CHARS}]+(?:[,\.\-\u2013\u2014][{REFERENCE_SUPERSCRIPT_CHARS}]+)*"
+)
+REFERENCE_TOKEN_RE = re.compile(r"\[\[\s*REF\s*(\d+)\s*\]\]", flags=re.IGNORECASE)
 
 class TranslationRequest(BaseModel):
     fileId: str
     sourceLang: str
     targetLang: str
+
+
+class ExportJobRequest(BaseModel):
+    outputType: str
+
+
+def _export_task_key(task_id: str, output_type: str) -> str:
+    return f"{task_id}:{output_type}"
+
+
+def _normalize_output_type(output_type: str) -> str:
+    normalized = (output_type or "").strip().lower()
+    if normalized not in {"translated", "bilingual"}:
+        raise HTTPException(status_code=400, detail="Invalid output_type")
+    return normalized
+
+
+def _build_export_size_metadata(task_id: str, file_id: str, output_type: str) -> Dict[str, Any]:
+    try:
+        source_path = pdf_service.get_file_path(file_id)
+        export_path = pdf_service.get_cached_export_pdf_path(task_id, output_type)
+        source_bytes = os.path.getsize(source_path)
+        export_bytes = os.path.getsize(export_path)
+    except Exception as error:
+        safe_print(
+            "[DEBUG] Export size metadata unavailable: "
+            f"task={task_id} output_type={output_type} error={error}"
+        )
+        return {}
+
+    size_ratio = export_bytes / max(source_bytes, 1)
+    return {
+        "sourceBytes": source_bytes,
+        "exportBytes": export_bytes,
+        "sizeRatio": round(size_ratio, 3),
+        "sizeWarnRatio": EXPORT_SIZE_WARN_RATIO,
+        "sizeWarning": size_ratio > EXPORT_SIZE_WARN_RATIO,
+    }
+
+
+def _build_quality_response_metadata(report: Dict[str, Any]) -> Dict[str, Any]:
+    summary = report.get("summary") or {}
+    return {
+        "qualityStatus": report.get("status", "unknown"),
+        "qualityWarnings": int(summary.get("warnings") or 0),
+        "qualityWarningCounts": summary.get("warningCounts") or {},
+    }
+
+
+def _build_and_save_export_quality_report(
+    task_id: str,
+    output_type: str,
+    result: Dict[str, Any],
+    size_metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    report = build_pdf_quality_report(
+        result,
+        output_type=output_type,
+        source_bytes=size_metadata.get("sourceBytes"),
+        export_bytes=size_metadata.get("exportBytes"),
+        size_warn_ratio=EXPORT_SIZE_WARN_RATIO,
+    )
+    pdf_service.save_export_quality_report(task_id, output_type, report)
+    return report
 
 
 def _get_preview_url_secret() -> str:
@@ -54,13 +163,14 @@ def _build_preview_signature(
     user_id: str,
     format: str,
     output_type: str,
+    download: bool = False,
     expires_at: int,
 ) -> str:
     secret = _get_preview_url_secret()
     if not secret:
         raise HTTPException(status_code=503, detail="Preview URL signing is not configured")
 
-    payload = f"{task_id}:{user_id}:{format}:{output_type}:{expires_at}"
+    payload = f"{task_id}:{user_id}:{format}:{output_type}:{int(download)}:{expires_at}"
     return hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -70,6 +180,7 @@ def _build_signed_preview_query(
     user_id: str,
     format: str = "pdf",
     output_type: str = "bilingual",
+    download: bool = False,
 ) -> str:
     expires_at = int(time.time()) + PREVIEW_URL_TTL_SECONDS
     signature = _build_preview_signature(
@@ -77,14 +188,18 @@ def _build_signed_preview_query(
         user_id=user_id,
         format=format,
         output_type=output_type,
+        download=download,
         expires_at=expires_at,
     )
-    return urlencode({
+    query = {
         "format": format,
         "output_type": output_type,
         "preview_expires": expires_at,
         "preview_signature": signature,
-    })
+    }
+    if download:
+        query["download"] = "true"
+    return urlencode(query)
 
 
 def _verify_signed_preview_request(
@@ -93,6 +208,7 @@ def _verify_signed_preview_request(
     task_owner_id: str,
     format: str,
     output_type: str,
+    download: bool = False,
     preview_expires: Optional[int],
     preview_signature: Optional[str],
 ) -> bool:
@@ -106,6 +222,7 @@ def _verify_signed_preview_request(
         user_id=task_owner_id,
         format=format,
         output_type=output_type,
+        download=download,
         expires_at=preview_expires,
     )
     return hmac.compare_digest(expected_signature, preview_signature)
@@ -342,6 +459,139 @@ def _chunk_translatable_blocks(blocks: list[Dict[str, Any]]) -> list[list[tuple[
     return batches
 
 
+def _leading_layout_marker(text: str) -> str:
+    stripped = text.lstrip()
+    marker_match = re.match(
+        r"^((?:[\*\u2022\u00b7\-–—]\s+)|(?:\(?[A-Za-z0-9ivxlcdmIVXLCDM]{1,8}[\).]\s+))",
+        stripped,
+    )
+    return marker_match.group(1) if marker_match else ""
+
+
+def _looks_like_heading_block(block: Dict[str, Any]) -> bool:
+    text = str(block.get("text") or "").strip()
+    if not text or len(text) > 140:
+        return False
+    lines = [
+        line for line in block.get("lines", [])
+        if str(line.get("text") or "").strip()
+    ]
+    if len(lines) != 1:
+        return False
+    word_count = len(re.findall(r"[\w]+(?:[-/][\w]+)*", text, flags=re.UNICODE))
+    if word_count > 16:
+        return False
+    return not text.endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "："))
+
+
+def _translation_role_for_block(block: Dict[str, Any]) -> str:
+    layout_role = str(block.get("layout_role") or "body")
+    if layout_role != "body":
+        return layout_role
+
+    text = str(block.get("text") or "").strip()
+    if _leading_layout_marker(text):
+        return "list_item"
+    if re.match(r"^(figure|fig\.?|table)\s+\w+", text, flags=re.IGNORECASE):
+        return "caption"
+    if _looks_like_heading_block(block):
+        return "heading"
+    return "body"
+
+
+def _extract_reference_markers(text: str) -> list[str]:
+    return REFERENCE_MARKER_RE.findall(text or "")
+
+
+def _protect_reference_markers(text: str) -> str:
+    markers: list[str] = []
+
+    def replace_marker(match: re.Match[str]) -> str:
+        token = f"[[REF{len(markers)}]]"
+        markers.append(match.group(0))
+        return token
+
+    return REFERENCE_MARKER_RE.sub(replace_marker, text or "")
+
+
+def _insert_before_terminal_punctuation(text: str, suffix: str) -> str:
+    if not text:
+        return suffix
+
+    match = re.search(r"([,.;:!?，。；：！？、\s]+)$", text)
+    if not match:
+        return f"{text}{suffix}"
+
+    return f"{text[:match.start()]}{suffix}{match.group(1)}"
+
+
+def _restore_reference_markers(translated_text: str, source_text: str) -> str:
+    source_markers = _extract_reference_markers(source_text)
+    if not source_markers:
+        return translated_text
+
+    restored = translated_text
+    for index, marker in enumerate(source_markers):
+        restored = re.sub(
+            rf"\[\[\s*REF\s*{index}\s*\]\]",
+            marker,
+            restored,
+            flags=re.IGNORECASE,
+        )
+
+    remaining_text = restored
+    missing_markers: list[str] = []
+    for marker in source_markers:
+        if marker in remaining_text:
+            remaining_text = remaining_text.replace(marker, "", 1)
+        else:
+            missing_markers.append(marker)
+
+    if missing_markers:
+        restored = _insert_before_terminal_punctuation(restored, "".join(missing_markers))
+
+    return restored
+
+
+def _build_translation_item(block_index: int, block: Dict[str, Any]) -> Dict[str, Any]:
+    text = str(block.get("text") or "")
+    lines = [
+        line for line in block.get("lines", [])
+        if str(line.get("text") or "").strip()
+    ]
+    return {
+        "id": block_index,
+        "text": _protect_reference_markers(text),
+        "role": _translation_role_for_block(block),
+        "lineCount": max(len(lines), 1),
+        "leadingMarker": _leading_layout_marker(text),
+        "endsWithSentencePunctuation": text.rstrip().endswith((".", "!", "?", ";", ":", "。", "！", "？", "；", "：")),
+    }
+
+
+def _translation_cache_key(block: Dict[str, Any], source_lang: str, target_lang: str) -> str:
+    item = _build_translation_item(-1, block)
+    return json.dumps(
+        {
+            "source": source_lang,
+            "target": target_lang,
+            "role": item.get("role"),
+            "text": item.get("text"),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _normalize_translated_block_text(translated_text: str, source_text: str) -> str:
+    normalized = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", translated_text).strip()
+    normalized = _restore_reference_markers(normalized, source_text)
+    marker = _leading_layout_marker(source_text)
+    if marker and normalized and not normalized.startswith(marker):
+        normalized = f"{marker}{normalized}"
+    return normalized
+
+
 async def _translate_batch_with_fallback(
     translator: Any,
     batch: list[tuple[int, Dict[str, Any]]],
@@ -350,39 +600,120 @@ async def _translate_batch_with_fallback(
     *,
     page_number: Optional[int] = None,
     batch_number: Optional[int] = None,
+    translation_cache: Optional[Dict[str, str]] = None,
+    cache_lock: Optional[asyncio.Lock] = None,
 ) -> Dict[int, str]:
     texts = [str(block.get("text") or "") for _, block in batch]
+    cached_translations: Dict[int, str] = {}
+    uncached_batch: list[tuple[int, Dict[str, Any]]] = []
+    if translation_cache is not None:
+        for block_index, block in batch:
+            cache_key = _translation_cache_key(block, source_lang, target_lang)
+            cached_value = translation_cache.get(cache_key)
+            if cached_value is None:
+                uncached_batch.append((block_index, block))
+            else:
+                cached_translations[block_index] = cached_value
+    else:
+        uncached_batch = batch
+
+    if not uncached_batch:
+        safe_print(
+            "[PERF] Batch translated from cache: "
+            f"page={page_number or '?'} batch={batch_number or '?'} "
+            f"blocks={len(batch)} cache_hits={len(cached_translations)}"
+        )
+        return cached_translations
+
+    structured_items = [
+        _build_translation_item(block_index, block)
+        for block_index, block in uncached_batch
+    ]
+    unique_items: list[Dict[str, Any]] = []
+    unique_key_by_position: list[str] = []
+    item_by_key: Dict[str, Dict[str, Any]] = {}
+    for item in structured_items:
+        key = json.dumps(
+            {
+                "role": item.get("role"),
+                "text": item.get("text"),
+                "leadingMarker": item.get("leadingMarker"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        unique_key_by_position.append(key)
+        if key not in item_by_key:
+            unique_item = dict(item)
+            unique_item["id"] = len(unique_items)
+            item_by_key[key] = unique_item
+            unique_items.append(unique_item)
+
     started_at = time.perf_counter()
     try:
-        translations = await translator.translate_batch(texts, source_lang, target_lang)
-        if len(translations) != len(batch):
+        unique_translations = await translator.translate_structured_batch(unique_items, source_lang, target_lang)
+        if len(unique_translations) != len(unique_items):
             raise ValueError("Batch translation count mismatch")
+        translated_by_key = {
+            key: unique_translations[item_by_key[key]["id"]]
+            for key in item_by_key
+        }
+        translations = [translated_by_key[key] for key in unique_key_by_position]
         safe_print(
             "[PERF] Batch translated: "
             f"page={page_number or '?'} batch={batch_number or '?'} "
-            f"blocks={len(batch)} chars={sum(len(text) for text in texts)} "
+            f"blocks={len(batch)} unique_blocks={len(unique_items)} cache_hits={len(cached_translations)} "
+            f"chars={sum(len(text) for text in texts)} "
             f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.0f}"
         )
-        return {
-            batch[index][0]: translations[index]
-            for index in range(len(batch))
+        translated = {
+            uncached_batch[index][0]: translations[index]
+            for index in range(len(uncached_batch))
         }
+        if translation_cache is not None:
+            if cache_lock is not None:
+                async with cache_lock:
+                    for block_index, block in uncached_batch:
+                        translation_cache[_translation_cache_key(block, source_lang, target_lang)] = translated[block_index]
+            else:
+                for block_index, block in uncached_batch:
+                    translation_cache[_translation_cache_key(block, source_lang, target_lang)] = translated[block_index]
+        translated.update(cached_translations)
+        return translated
     except Exception as batch_error:
         safe_print(
             "[DEBUG] Batch translation fallback triggered: "
             f"page={page_number or '?'} batch={batch_number or '?'} error={batch_error}"
         )
-        translated: Dict[int, str] = {}
-        for block_index, block in batch:
-            translated[block_index] = await translator.translate(
-                str(block.get("text") or ""),
-                source_lang,
-                target_lang,
-            )
+        fallback_semaphore = asyncio.Semaphore(TRANSLATION_FALLBACK_CONCURRENCY)
+
+        async def translate_one(block_index: int, block: Dict[str, Any]) -> tuple[int, str]:
+            async with fallback_semaphore:
+                item = _build_translation_item(block_index, block)
+                translations = await translator.translate_structured_batch(
+                    [item],
+                    source_lang,
+                    target_lang,
+                )
+                return block_index, translations[0] if translations else str(block.get("text") or "")
+
+        translated_items = await asyncio.gather(
+            *(translate_one(block_index, block) for block_index, block in uncached_batch)
+        )
+        translated = dict(translated_items)
+        if translation_cache is not None:
+            if cache_lock is not None:
+                async with cache_lock:
+                    for block_index, block in uncached_batch:
+                        translation_cache[_translation_cache_key(block, source_lang, target_lang)] = translated[block_index]
+            else:
+                for block_index, block in uncached_batch:
+                    translation_cache[_translation_cache_key(block, source_lang, target_lang)] = translated[block_index]
+        translated.update(cached_translations)
         safe_print(
             "[PERF] Batch fallback translated: "
             f"page={page_number or '?'} batch={batch_number or '?'} "
-            f"blocks={len(batch)} chars={sum(len(text) for text in texts)} "
+            f"blocks={len(batch)} cache_hits={len(cached_translations)} chars={sum(len(text) for text in texts)} "
             f"elapsed_ms={(time.perf_counter() - started_at) * 1000:.0f}"
         )
         return translated
@@ -395,6 +726,8 @@ async def _translate_page_blocks(
     target_lang: str,
     *,
     page_number: Optional[int] = None,
+    translation_cache: Optional[Dict[str, str]] = None,
+    cache_lock: Optional[asyncio.Lock] = None,
 ) -> list[Dict[str, Any]]:
     translated_blocks = [dict(block) for block in text_blocks]
     batches = _chunk_translatable_blocks(translated_blocks)
@@ -414,6 +747,8 @@ async def _translate_page_blocks(
                 target_lang,
                 page_number=page_number,
                 batch_number=batch_index + 1,
+                translation_cache=translation_cache,
+                cache_lock=cache_lock,
             )
 
     batch_results = await asyncio.gather(*(run_batch(index, batch) for index, batch in enumerate(batches)))
@@ -430,7 +765,9 @@ async def _translate_page_blocks(
         elif block.get("is_header_footer_metadata"):
             block["translatedText"] = ""
         else:
-            block["translatedText"] = translated_text_by_index.get(index, str(block.get("text") or ""))
+            source_text = str(block.get("text") or "")
+            raw_translated_text = translated_text_by_index.get(index, source_text)
+            block["translatedText"] = _normalize_translated_block_text(raw_translated_text, source_text)
             block["is_formula"] = False
 
     return translated_blocks
@@ -513,6 +850,8 @@ async def _process_translation_page(
     target_lang: str,
     user_id: str,
     plan_metadata: Dict[str, Any],
+    translation_cache: Optional[Dict[str, str]] = None,
+    cache_lock: Optional[asyncio.Lock] = None,
 ) -> None:
     attempts = initial_retry_count
 
@@ -540,6 +879,8 @@ async def _process_translation_page(
                 source_lang,
                 target_lang,
                 page_number=page_number,
+                translation_cache=translation_cache,
+                cache_lock=cache_lock,
             )
             page_result = _build_page_result(
                 page_number - 1,
@@ -613,14 +954,7 @@ def _ensure_task_owner(task_id: str, user_id: str) -> Dict[str, Any]:
             _raise_not_found()
         return task
 
-    try:
-        result = pdf_service.load_translation_result(task_id)
-    except FileNotFoundError:
-        _raise_not_found()
-
-    if result.get("userId") != user_id:
-        _raise_not_found()
-    return result
+    _raise_not_found()
 
 
 @router.post("/api/billing/paddle/webhook")
@@ -788,172 +1122,30 @@ async def get_my_usage(current_user: CurrentUser = Depends(get_current_user)):
     })
 
 
-async def _legacy_translate_pdf_task_slow(
-    task_id: str,
-    file_id: str,
-    source_lang: str,
-    target_lang: str,
-    user_id: str,
-    pages_to_translate: int,
-    plan_metadata: Dict[str, Any],
-):
-    try:
-        translation_tasks[task_id] = {
-            "status": "processing",
-            "progress": 0,
-            "processedPages": 0,
-            "totalPages": 0,
-            "userId": user_id,
+async def auto_prepare_export_pdfs(task_id: str, file_id: str, result: Dict[str, Any]) -> None:
+    if not AUTO_PREPARE_EXPORTS or not AUTO_PREPARE_EXPORT_TYPES:
+        return
+
+    for output_type in AUTO_PREPARE_EXPORT_TYPES:
+        job_key = _export_task_key(task_id, output_type)
+        current_job = export_tasks.get(job_key)
+        if pdf_service.has_cached_export_pdf(task_id, output_type):
+            continue
+        if current_job and current_job.get("status") in {"queued", "rendering"}:
+            continue
+
+        export_tasks[job_key] = {
+            "status": "queued",
+            "taskId": task_id,
+            "outputType": output_type,
+            "error": "",
+            "autoPrepared": True,
         }
-        
-        total_pages = pdf_service.get_total_pages(file_id)
-        pages_to_translate = min(pages_to_translate, total_pages)
-        is_partial = pages_to_translate < total_pages
-        translation_tasks[task_id]["totalPages"] = total_pages
-        translation_tasks[task_id]["requestedPages"] = pages_to_translate
-        translation_tasks[task_id]["translatedPages"] = 0
-        translation_tasks[task_id]["isPartial"] = is_partial
-        translation_tasks[task_id]["plan"] = plan_metadata["plan"]
-        db_service.update_translation_task(
-            task_id,
-            total_pages=total_pages,
-            requested_pages=pages_to_translate,
-            translated_pages=0,
-            is_partial=is_partial,
+        safe_print(
+            "[PERF] Auto export queued: "
+            f"task={task_id} output_type={output_type}"
         )
-        
-        translator = TranslationServiceFactory.get("ofoxai")
-        safe_print(f"[DEBUG] Translator type: {type(translator).__name__}")
-        result = {
-            "pages": [],
-            "fileId": file_id,
-            "userId": user_id,
-            "totalPages": total_pages,
-            "translatedPages": pages_to_translate,
-            "isPartial": is_partial,
-            "plan": plan_metadata["plan"],
-            "pageLimit": plan_metadata["maxPagesPerFile"],
-            "usageMonth": plan_metadata.get("usageMonth"),
-            "monthlyPageQuota": plan_metadata.get("monthlyPageQuota"),
-        }
-        
-        for page_num in range(pages_to_translate):
-            text_blocks = pdf_service.extract_text_blocks(file_id, page_num)
-            full_text = pdf_service.extract_full_text(file_id, page_num)
-            
-            translated_blocks = []
-            for block in text_blocks:
-                block_type = block.get("type", "text")
-                
-                if block_type == "image":
-                    # 图片块，不翻译
-                    translated_blocks.append({
-                        "type": "image",
-                        "bbox": block["bbox"],
-                        "text": "",
-                        "translatedText": "",
-                    })
-                elif not pdf_service.is_translatable_text_block(block):
-                    translated_blocks.append({
-                        "type": block.get("type", "text"),
-                        "bbox": block["bbox"],
-                        "text": block["text"],
-                        "translatedText": "",
-                        "font_size": block.get("font_size"),
-                        "lines": block.get("lines", []),
-                        "is_formula": block.get("is_formula", False),
-                        "is_chart_text": block.get("is_chart_text", False),
-                        "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
-                    })
-                elif block.get("is_header_footer_metadata"):
-                    translated_blocks.append({
-                        "type": "text",
-                        "bbox": block["bbox"],
-                        "text": block["text"],
-                        "translatedText": "",
-                        "font_size": block.get("font_size"),
-                        "lines": block.get("lines", []),
-                        "is_formula": False,
-                        "is_header_footer_metadata": True,
-                    })
-                else:
-                    # 文本块，逐块翻译
-                    try:
-                        translated_text = await translator.translate(
-                            block["text"], source_lang, target_lang
-                        )
-                        translated_blocks.append({
-                            "type": "text",
-                            "bbox": block["bbox"],
-                            "text": block["text"],
-                            "translatedText": translated_text,
-                            "font_size": block.get("font_size"),
-                            "lines": block.get("lines", []),
-                            "is_formula": False,
-                            "is_chart_text": block.get("is_chart_text", False),
-                            "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
-                        })
-                    except Exception as e:
-                        safe_print(f"[DEBUG] Block translation failed: {str(e)}")
-                        translated_blocks.append({
-                            "type": "text",
-                            "bbox": block["bbox"],
-                            "text": block["text"],
-                            "translatedText": block["text"],
-                            "font_size": block.get("font_size"),
-                            "lines": block.get("lines", []),
-                            "is_formula": block.get("is_formula", False),
-                            "is_chart_text": block.get("is_chart_text", False),
-                            "is_header_footer_metadata": block.get("is_header_footer_metadata", False),
-                        })
-            
-            # 整页翻译用于预览
-            translated_full = _build_page_translated_text(translated_blocks)
-            
-            result["pages"].append({
-                "pageNum": page_num + 1,
-                "original": full_text,
-                "translated": translated_full,
-                "textBlocks": translated_blocks,
-            })
-            
-            translation_tasks[task_id]["processedPages"] = page_num + 1
-            translation_tasks[task_id]["translatedPages"] = page_num + 1
-            translation_tasks[task_id]["progress"] = ((page_num + 1) / max(pages_to_translate, 1)) * 100
-            db_service.update_translation_task(
-                task_id,
-                progress=translation_tasks[task_id]["progress"],
-                processed_pages=page_num + 1,
-                translated_pages=page_num + 1,
-                total_pages=total_pages,
-            )
-            
-            await asyncio.sleep(0.5)
-        
-        pdf_service.save_translation_result(task_id, result)
-        db_service.record_usage_event(
-            task_id=task_id,
-            file_id=file_id,
-            user_id=user_id,
-            plan=plan_metadata["plan"],
-            pages=len(result["pages"]),
-            usage_month=plan_metadata.get("usageMonth"),
-        )
-        translation_tasks[task_id]["status"] = "completed"
-        db_service.update_translation_task(
-            task_id,
-            status="completed",
-            progress=100,
-            processed_pages=pages_to_translate,
-            translated_pages=pages_to_translate,
-            total_pages=total_pages,
-        )
-        
-    except Exception as e:
-        if task_id in translation_tasks:
-            translation_tasks[task_id]["status"] = "error"
-            translation_tasks[task_id]["error"] = str(e)
-        db_service.update_translation_task(task_id, status="error", error=str(e))
+        await render_export_pdf_task(task_id, file_id, result, output_type)
 
 
 async def translate_pdf_task(
@@ -1007,6 +1199,8 @@ async def translate_pdf_task(
         )
 
         page_semaphore = asyncio.Semaphore(PAGE_TRANSLATION_CONCURRENCY)
+        translation_cache: Dict[str, str] = {}
+        translation_cache_lock = asyncio.Lock()
 
         async def run_page(page_row: Dict[str, Any]) -> None:
             page_number = int(page_row["page_number"])
@@ -1021,6 +1215,8 @@ async def translate_pdf_task(
                     target_lang=target_lang,
                     user_id=user_id,
                     plan_metadata=plan_metadata,
+                    translation_cache=translation_cache,
+                    cache_lock=translation_cache_lock,
                 )
                 _sync_task_progress(
                     task_id,
@@ -1034,9 +1230,7 @@ async def translate_pdf_task(
 
         counts = db_service.get_task_page_counts(task_id)
         if counts.get("completed", 0) >= pages_to_translate:
-            page_results = pdf_service.load_page_translation_results(task_id)
             result = {
-                "pages": sorted(page_results, key=lambda page: page.get("pageNum", 0)),
                 "fileId": file_id,
                 "userId": user_id,
                 "totalPages": total_pages,
@@ -1069,6 +1263,7 @@ async def translate_pdf_task(
                 translated_pages=pages_to_translate,
                 is_partial=is_partial,
             )
+            asyncio.create_task(auto_prepare_export_pdfs(task_id, file_id, result))
         else:
             _sync_task_progress(
                 task_id,
@@ -1204,22 +1399,7 @@ async def get_progress(task_id: str, current_user: CurrentUser = Depends(get_cur
                 "isPartial": bool(task_record.get("is_partial")),
                 **({"error": task_record["error"]} if task_record.get("error") else {}),
             })
-
-        try:
-            result = pdf_service.load_translation_result(task_id)
-            total_pages = result.get("totalPages", len(result["pages"]))
-            translated_pages = result.get("translatedPages", len(result["pages"]))
-            return JSONResponse({
-                "status": "completed",
-                "progress": 100,
-                "processedPages": translated_pages,
-                "totalPages": total_pages,
-                "requestedPages": translated_pages,
-                "translatedPages": translated_pages,
-                "isPartial": bool(result.get("isPartial")),
-            })
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="Task not found")
     
     progress = {key: value for key, value in translation_tasks[task_id].items() if key != "userId"}
     return JSONResponse(progress)
@@ -1230,10 +1410,34 @@ async def get_result(
     include_pages: bool = True,
     current_user: CurrentUser = Depends(get_current_user),
 ):
-    _ensure_task_owner(task_id, current_user.id)
+    task_record = _ensure_task_owner(task_id, current_user.id)
 
     try:
-        result = pdf_service.load_translation_result(task_id)
+        if not include_pages:
+            file_id = task_record.get("file_id") or task_record.get("fileId")
+            total_pages = task_record.get("total_pages") or task_record.get("totalPages")
+            translated_pages = (
+                task_record.get("translated_pages")
+                or task_record.get("translatedPages")
+                or task_record.get("processed_pages")
+            )
+            if file_id and total_pages is not None:
+                return JSONResponse({
+                    "success": True,
+                    "fileId": file_id,
+                    "totalPages": total_pages,
+                    "translatedPages": translated_pages or 0,
+                    "isPartial": bool(task_record.get("is_partial") or task_record.get("isPartial")),
+                    "previewUrl": (
+                        f"/api/export/{task_id}?{_build_signed_preview_query(task_id=task_id, user_id=current_user.id)}"
+                    ),
+                })
+
+        result = (
+            pdf_service.load_translation_result_with_pages(task_id)
+            if include_pages
+            else pdf_service.load_translation_result(task_id)
+        )
         if result.get("userId") != current_user.id:
             _raise_not_found()
         response_result = {key: value for key, value in result.items() if key != "userId"}
@@ -1249,8 +1453,262 @@ async def get_result(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Result not found")
     except Exception as e:
-        safe_print(f"[DEBUG] Export failed for task={task_id}, format={format}, output_type={output_type}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e) or "Failed to export translation")
+        safe_print(f"[DEBUG] Result load failed for task={task_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e) or "Failed to load translation result")
+
+
+@router.get("/api/translate/{task_id}/pages/{page_num}/preview")
+async def get_translation_page_preview(
+    task_id: str,
+    page_num: int,
+    width: int = 1800,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    task_record = _ensure_task_owner(task_id, current_user.id)
+    if page_num < 1:
+        raise HTTPException(status_code=400, detail="Invalid page number")
+
+    try:
+        file_id = task_record.get("file_id") or task_record.get("fileId")
+        if not file_id:
+            raise FileNotFoundError("Source file not found")
+
+        safe_width = min(max(width, 800), 2600)
+        if pdf_service.has_cached_export_pdf(task_id, "bilingual"):
+            try:
+                preview_bytes = pdf_service.generate_cached_export_page_preview_png(
+                    task_id,
+                    "bilingual",
+                    page_num=page_num - 1,
+                    max_width=safe_width,
+                )
+            except Exception as cache_error:
+                safe_print(
+                    "[DEBUG] Cached export page preview unavailable: "
+                    f"task={task_id} page={page_num} error={cache_error}"
+                )
+                page_result = pdf_service.load_page_translation_result(task_id, page_num - 1)
+                preview_bytes = pdf_service.generate_bilingual_page_preview_png(
+                    file_id,
+                    {"pages": [page_result]},
+                    page_num=page_num - 1,
+                    max_width=safe_width,
+                )
+        else:
+            page_result = pdf_service.load_page_translation_result(task_id, page_num - 1)
+            preview_bytes = pdf_service.generate_bilingual_page_preview_png(
+                file_id,
+                {"pages": [page_result]},
+                page_num=page_num - 1,
+                max_width=safe_width,
+            )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Result not found")
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except Exception as error:
+        safe_print(f"[DEBUG] Page preview failed for task={task_id}, page={page_num}: {str(error)}")
+        raise HTTPException(status_code=500, detail="Failed to render page preview")
+
+    return Response(
+        preview_bytes,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "private, max-age=300",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+async def render_export_pdf_task(
+    task_id: str,
+    file_id: str,
+    result: Dict[str, Any],
+    output_type: str,
+) -> None:
+    output_type = _normalize_output_type(output_type)
+    job_key = _export_task_key(task_id, output_type)
+    started_at = time.perf_counter()
+    export_tasks[job_key] = {
+        **export_tasks.get(job_key, {}),
+        "status": "rendering",
+        "taskId": task_id,
+        "outputType": output_type,
+        "startedAt": started_at,
+        "error": "",
+    }
+
+    try:
+        if not pdf_service.has_cached_export_pdf(task_id, output_type):
+            safe_print(f"[PERF] Export job cache miss: task={task_id} output_type={output_type}")
+            export_result = result
+            if not export_result.get("pages"):
+                export_result = await asyncio.to_thread(pdf_service.load_translation_result_with_pages, task_id)
+            if output_type == "translated":
+                pdf_bytes = await asyncio.to_thread(pdf_service.generate_translated_pdf, file_id, export_result)
+            else:
+                pdf_bytes = await asyncio.to_thread(pdf_service.generate_bilingual_pdf, file_id, export_result)
+            await asyncio.to_thread(pdf_service.save_cached_export_pdf, task_id, output_type, pdf_bytes)
+        else:
+            safe_print(f"[PERF] Export job cache hit: task={task_id} output_type={output_type}")
+
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        size_metadata = _build_export_size_metadata(task_id, file_id, output_type)
+        quality_result = result
+        if not quality_result.get("pages"):
+            quality_result = await asyncio.to_thread(pdf_service.load_translation_result_with_pages, task_id)
+        quality_report = await asyncio.to_thread(
+            _build_and_save_export_quality_report,
+            task_id,
+            output_type,
+            quality_result,
+            size_metadata,
+        )
+        quality_metadata = _build_quality_response_metadata(quality_report)
+        export_tasks[job_key] = {
+            "status": "ready",
+            "taskId": task_id,
+            "outputType": output_type,
+            "elapsedMs": elapsed_ms,
+            "downloadUrl": f"/api/export/{task_id}?format=pdf&output_type={output_type}&download=true",
+            **size_metadata,
+        }
+        size_log = (
+            f" source_bytes={size_metadata.get('sourceBytes')} "
+            f"export_bytes={size_metadata.get('exportBytes')} "
+            f"size_ratio={size_metadata.get('sizeRatio')}"
+            if size_metadata
+            else ""
+        )
+        safe_print(
+            "[PERF] Export job ready: "
+            f"task={task_id} output_type={output_type} elapsed_ms={elapsed_ms}{size_log}"
+        )
+        if size_metadata.get("sizeWarning"):
+            safe_print(
+                "[WARN] Export size ratio exceeded target: "
+                f"task={task_id} output_type={output_type} "
+                f"ratio={size_metadata.get('sizeRatio')} threshold={EXPORT_SIZE_WARN_RATIO}"
+            )
+        if quality_metadata.get("qualityWarnings"):
+            safe_print(
+                "[WARN] Export quality warnings: "
+                f"task={task_id} output_type={output_type} "
+                f"warnings={quality_metadata.get('qualityWarnings')} "
+                f"codes={quality_metadata.get('qualityWarningCounts')}"
+            )
+    except Exception as error:
+        elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+        export_tasks[job_key] = {
+            "status": "error",
+            "taskId": task_id,
+            "outputType": output_type,
+            "elapsedMs": elapsed_ms,
+            "error": str(error) or "Failed to render export PDF",
+        }
+        safe_print(f"[DEBUG] Export job failed: task={task_id} output_type={output_type} error={error}")
+
+
+def _build_signed_download_url(task_id: str, output_type: str, user_id: str) -> str:
+    return f"/api/export/{task_id}?{_build_signed_preview_query(task_id=task_id, user_id=user_id, output_type=output_type, download=True)}"
+
+
+def _build_export_job_response(task_id: str, output_type: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    output_type = _normalize_output_type(output_type)
+    job_key = _export_task_key(task_id, output_type)
+    job = export_tasks.get(job_key)
+    download_url = (
+        _build_signed_download_url(task_id, output_type, user_id)
+        if user_id
+        else f"/api/export/{task_id}?format=pdf&output_type={output_type}&download=true"
+    )
+
+    if pdf_service.has_cached_export_pdf(task_id, output_type):
+        return {
+            "success": True,
+            "status": "ready",
+            "taskId": task_id,
+            "outputType": output_type,
+            "downloadUrl": download_url,
+            **({"elapsedMs": job["elapsedMs"]} if job and "elapsedMs" in job else {}),
+            **({
+                "sourceBytes": job["sourceBytes"],
+                "exportBytes": job["exportBytes"],
+                "sizeRatio": job["sizeRatio"],
+                "sizeWarnRatio": job["sizeWarnRatio"],
+                "sizeWarning": job["sizeWarning"],
+            } if job and "sizeRatio" in job else {}),
+        }
+
+    if job:
+        return {
+            "success": True,
+            "status": job.get("status", "queued"),
+            "taskId": task_id,
+            "outputType": output_type,
+            **({"error": job["error"]} if job.get("error") else {}),
+            **({"elapsedMs": job["elapsedMs"]} if "elapsedMs" in job else {}),
+            **({
+                "sourceBytes": job["sourceBytes"],
+                "exportBytes": job["exportBytes"],
+                "sizeRatio": job["sizeRatio"],
+                "sizeWarnRatio": job["sizeWarnRatio"],
+                "sizeWarning": job["sizeWarning"],
+            } if "sizeRatio" in job else {}),
+        }
+
+    return {
+        "success": True,
+        "status": "missing",
+        "taskId": task_id,
+        "outputType": output_type,
+    }
+
+
+@router.post("/api/export/{task_id}/jobs")
+async def start_export_job(
+    task_id: str,
+    request: ExportJobRequest,
+    background_tasks: BackgroundTasks,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    _ensure_task_owner(task_id, current_user.id)
+    output_type = _normalize_output_type(request.outputType)
+
+    try:
+        result = pdf_service.load_translation_result(task_id)
+        if result.get("userId") != current_user.id:
+            _raise_not_found()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Result not found")
+
+    file_id = result.get("fileId") or task_id
+    job_key = _export_task_key(task_id, output_type)
+    current_job = export_tasks.get(job_key)
+    if (
+        not pdf_service.has_cached_export_pdf(task_id, output_type)
+        and (not current_job or current_job.get("status") not in {"queued", "rendering"})
+    ):
+        export_tasks[job_key] = {
+            "status": "queued",
+            "taskId": task_id,
+            "outputType": output_type,
+            "error": "",
+        }
+        background_tasks.add_task(render_export_pdf_task, task_id, file_id, result, output_type)
+
+    return JSONResponse(_build_export_job_response(task_id, output_type, current_user.id))
+
+
+@router.get("/api/export/{task_id}/jobs/{output_type}")
+async def get_export_job(
+    task_id: str,
+    output_type: str,
+    current_user: CurrentUser = Depends(get_current_user),
+):
+    _ensure_task_owner(task_id, current_user.id)
+    return JSONResponse(_build_export_job_response(task_id, output_type, current_user.id))
+
 
 @router.get("/api/export/{task_id}")
 async def export_translation(
@@ -1270,17 +1728,17 @@ async def export_translation(
             format = "pdf"
             output_type = "translated"
 
-        result = pdf_service.load_translation_result(task_id)
+        result = pdf_service.load_translation_result_with_pages(task_id)
         task_owner_id = str(result.get("userId") or "")
 
-        has_signed_preview_access = (
-            not download
-            and format == "pdf"
+        has_signed_export_access = (
+            format == "pdf"
             and _verify_signed_preview_request(
                 task_id=task_id,
                 task_owner_id=task_owner_id,
                 format=format,
                 output_type=output_type,
+                download=download,
                 preview_expires=preview_expires,
                 preview_signature=preview_signature,
             )
@@ -1289,7 +1747,7 @@ async def export_translation(
         if current_user is not None:
             if task_owner_id != current_user.id:
                 _raise_not_found()
-        elif not has_signed_preview_access:
+        elif not has_signed_export_access:
             raise HTTPException(status_code=401, detail="Missing Authorization header")
 
         file_id = result.get("fileId") or task_id
