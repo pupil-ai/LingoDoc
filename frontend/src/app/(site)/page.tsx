@@ -70,7 +70,7 @@ function Footer() {
           <Link href="/help">Help</Link>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <span>support@lingodoc.com</span>
+          <span>support@lingodoc.xyz</span>
           <span>-</span>
           <span>Made with care for translators</span>
         </div>

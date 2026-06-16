@@ -42,6 +42,8 @@ npm-debug.log*
 .env
 .env.local
 .env.*.local
+*.env.production.server
+backend/.env.production.server
 
 #other
 design/

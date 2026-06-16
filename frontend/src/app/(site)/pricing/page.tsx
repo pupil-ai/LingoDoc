@@ -240,7 +240,7 @@ function ContactModal({ open, onClose }: { open: boolean; onClose: () => void })
             </div>
             <div>
               <p className="text-[12px] font-medium text-slate-400">Email</p>
-              <p className="mt-1 text-[16px] font-medium text-slate-700">support@lingodoc.com</p>
+              <p className="mt-1 text-[16px] font-medium text-slate-700">support@lingodoc.xyz</p>
             </div>
           </div>
         </div>

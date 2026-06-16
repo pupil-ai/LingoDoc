@@ -85,7 +85,7 @@ export default function HelpPage() {
           children: (
             <>
               <p>
-                For account, billing, upload, translation, or download issues, contact <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.com">support@lingodoc.com</a>.
+                For account, billing, upload, translation, or download issues, contact <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.xyz">support@lingodoc.xyz</a>.
               </p>
               <p>
                 Include the email on your account, the filename, approximate upload time, and what you were trying to do. Do not send private documents by email unless support specifically asks for a safe transfer method.

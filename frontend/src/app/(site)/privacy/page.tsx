@@ -87,7 +87,7 @@ export default function PrivacyPage() {
                 You can choose not to upload a document, delete uploaded files from your dashboard, or stop using the service. Subscription management and billing actions are handled through Paddle checkout and related subscription flows.
               </p>
               <p>
-                For privacy questions or account-related requests, contact us at <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.com">support@lingodoc.com</a>.
+                For privacy questions or account-related requests, contact us at <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.xyz">support@lingodoc.xyz</a>.
               </p>
             </>
           ),

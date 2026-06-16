@@ -96,7 +96,7 @@ export default function TermsPage() {
           title: 'Contact',
           children: (
             <p>
-              Questions about these terms can be sent to <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.com">support@lingodoc.com</a>.
+              Questions about these terms can be sent to <a className="font-semibold text-emerald-600" href="mailto:support@lingodoc.xyz">support@lingodoc.xyz</a>.
             </p>
           ),
         },
