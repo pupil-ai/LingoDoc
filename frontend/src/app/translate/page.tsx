@@ -94,7 +94,7 @@ function PreviewPlaceholder({
         <div className="absolute inset-0 flex items-center justify-center px-12 py-6">
           <img
             src={originalPreviewUrl}
-            alt="Original PDF first page preview"
+            alt="PDF preview background"
             className="h-full max-h-full w-auto max-w-full object-contain opacity-70"
           />
         </div>
@@ -105,15 +105,19 @@ function PreviewPlaceholder({
       <div className="absolute inset-0 bg-white/55 backdrop-blur-sm" />
       <div className="absolute inset-0 bg-gradient-to-b from-white/70 via-white/80 to-white/90" />
 
-      <div className="relative z-10 flex h-full w-full items-center justify-center px-6 py-10">
-        <div className="w-full max-w-[540px] px-10 py-12 text-center">
-          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-emerald-100 text-emerald-600 shadow-sm">
-            {processing ? <Loader2 className="size-8 animate-spin" strokeWidth={2} /> : <ArrowLeftRight className="size-8" strokeWidth={2} />}
+      <div className="relative z-10 flex h-full w-full items-center justify-center overflow-y-auto px-6 py-10">
+        <div className="grid w-full max-w-[540px] grid-rows-[auto_8rem] px-10 py-12 text-center">
+          <div>
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-emerald-100 text-emerald-600 shadow-sm">
+              {processing ? <Loader2 className="size-8 animate-spin" strokeWidth={2} /> : <ArrowLeftRight className="size-8" strokeWidth={2} />}
+            </div>
+            <h1 className="mt-8 text-[32px] font-bold tracking-[-0.04em] text-slate-900">{title}</h1>
+            <p className="mt-4 text-[16px] leading-relaxed text-slate-500">{description}</p>
           </div>
-          <h1 className="mt-8 text-[32px] font-bold tracking-[-0.04em] text-slate-900">{title}</h1>
-          <p className="mt-4 text-[16px] leading-relaxed text-slate-500">{description}</p>
-          {footer ? <div className="mt-8">{footer}</div> : null}
-          {error ? <p className="mt-6 text-[14px] font-medium text-red-600">{error}</p> : null}
+          <div className="mt-8">
+            {footer ? <div>{footer}</div> : null}
+            {error ? <p className="mt-6 text-[14px] font-medium text-red-600">{error}</p> : null}
+          </div>
         </div>
       </div>
     </div>
@@ -309,6 +313,7 @@ function TranslatedPagePreview({
   zoom,
   loading,
   error,
+  originalPreviewUrl,
   onPageChange,
   onZoomChange,
 }: {
@@ -318,6 +323,7 @@ function TranslatedPagePreview({
   zoom: number;
   loading: boolean;
   error: string;
+  originalPreviewUrl: string | null;
   onPageChange: (page: number) => void;
   onZoomChange: (zoom: number) => void;
 }) {
@@ -325,11 +331,14 @@ function TranslatedPagePreview({
     <div className="flex min-h-0 flex-1 flex-col bg-slate-100">
       <div className="relative min-h-0 flex-1 overflow-auto">
         {loading ? (
-          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 backdrop-blur-sm">
-            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-600 shadow-xl">
-              <Loader2 className="size-4 animate-spin" strokeWidth={2} />
-              Rendering page preview...
-            </div>
+          <div className="absolute inset-0 z-10">
+            <PreviewPlaceholder
+              title="Preparing page preview"
+              description="Rendering the selected page..."
+              originalPreviewUrl={imageUrl || originalPreviewUrl}
+              processing
+              overlay
+            />
           </div>
         ) : null}
 
@@ -349,9 +358,13 @@ function TranslatedPagePreview({
             />
           </div>
         ) : (
-          <div className="flex h-full items-center justify-center text-[13px] font-medium text-slate-400">
-            Preparing page preview...
-          </div>
+          <PreviewPlaceholder
+            title="Preparing page preview"
+            description="Rendering the selected page..."
+            originalPreviewUrl={imageUrl || originalPreviewUrl}
+            processing
+            overlay
+          />
         )}
       </div>
     </div>
@@ -1031,6 +1044,7 @@ function TranslatePageContent() {
           zoom={previewZoom}
           loading={isPreparingPreview || isPreviewLoading}
           error={previewError}
+          originalPreviewUrl={originalPreviewUrl}
           onPageChange={handlePreviewPageChange}
           onZoomChange={setPreviewZoom}
         />
