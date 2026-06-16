@@ -92,7 +92,7 @@ function HeaderAuthActions() {
       onClick={() => openSignIn()}
       className="inline-flex items-center rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-all hover:bg-slate-800"
     >
-      Sign In
+      Sign in
     </button>
   );
 }

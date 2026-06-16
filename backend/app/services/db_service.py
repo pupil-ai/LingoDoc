@@ -582,6 +582,69 @@ class DatabaseService:
             )
         return cursor.rowcount > 0
 
+    def reserve_page_usage_event(
+        self,
+        *,
+        task_id: str,
+        file_id: str,
+        user_id: str,
+        plan: str,
+        page_number: int,
+        usage_month: Optional[str] = None,
+        monthly_page_quota: Optional[int] = None,
+    ) -> bool:
+        month = usage_month or self.get_current_usage_month()
+        now = _utc_now()
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT 1
+                FROM usage_page_events
+                WHERE task_id = ? AND page_number = ?
+                """,
+                (task_id, page_number),
+            ).fetchone()
+            if existing:
+                return True
+
+            if monthly_page_quota is not None and monthly_page_quota > 0:
+                row = connection.execute(
+                    """
+                    SELECT (
+                        COALESCE((SELECT SUM(pages) FROM usage_events WHERE user_id = ? AND usage_month = ?), 0) +
+                        COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE user_id = ? AND usage_month = ?), 0)
+                    ) AS used_pages
+                    """,
+                    (user_id, month, user_id, month),
+                ).fetchone()
+                used_pages = int(row["used_pages"] or 0) if row else 0
+                if used_pages >= monthly_page_quota:
+                    return False
+
+            connection.execute(
+                """
+                INSERT INTO usage_page_events (
+                    task_id, file_id, user_id, plan, page_number, usage_month, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, file_id, user_id, plan, page_number, month, now),
+            )
+
+        return True
+
+    def delete_page_usage_event(self, task_id: str, page_number: int) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                DELETE FROM usage_page_events
+                WHERE task_id = ? AND page_number = ?
+                """,
+                (task_id, page_number),
+            )
+
     def list_user_files(self, user_id: str) -> list[Dict[str, Any]]:
         with self._connect() as connection:
             rows = connection.execute(

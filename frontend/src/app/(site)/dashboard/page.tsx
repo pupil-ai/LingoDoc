@@ -119,7 +119,7 @@ function DeleteModal({
           <Trash2 className="size-7" strokeWidth={2} />
         </div>
 
-        <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Delete File?</h3>
+        <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Delete file?</h3>
         <p className="mt-2 text-center text-[16px] text-slate-500">This action cannot be undone</p>
 
         <div className="mt-7 rounded-2xl border border-slate-200 bg-slate-50 p-3">

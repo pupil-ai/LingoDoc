@@ -45,10 +45,10 @@ function ClerkSetupRequired() {
 
 function formatPlanName(plan: string | undefined): string {
   if (!plan) {
-    return 'Current';
+    return 'Current plan';
   }
 
-  return `${plan.charAt(0).toUpperCase()}${plan.slice(1)} Plan`;
+  return `${plan.charAt(0).toUpperCase()}${plan.slice(1)} plan`;
 }
 
 function labelForLang(code: string): string {
@@ -63,6 +63,10 @@ function labelForLang(code: string): string {
     ru: 'Russian',
   };
   return labels[code] || code.toUpperCase();
+}
+
+function formatPageCount(count: number): string {
+  return `${count} page${count === 1 ? '' : 's'}`;
 }
 
 function wait(ms: number): Promise<void> {
@@ -141,11 +145,17 @@ function PreviewPlaceholder({
 function DownloadModal({
   open,
   filename,
+  isPartial,
+  translatedPages,
+  totalPages,
   onClose,
   onDownload,
 }: {
   open: boolean;
   filename: string;
+  isPartial: boolean;
+  translatedPages: number;
+  totalPages: number;
   onClose: () => void;
   onDownload: (type: DownloadType) => void;
 }) {
@@ -161,8 +171,8 @@ function DownloadModal({
     },
     {
       type: 'translated',
-      title: 'Translation only',
-      description: 'Just the translated text with original layout preserved.',
+      title: 'Translation-only PDF',
+      description: 'Translated text only, with layout kept close to the original where possible.',
     },
   ];
 
@@ -199,6 +209,12 @@ function DownloadModal({
               <Download className="mt-1 size-4 shrink-0 text-slate-300" strokeWidth={2} />
             </button>
           ))}
+
+          {isPartial ? (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[13px] leading-6 text-amber-800">
+              This export includes only the {formatPageCount(translatedPages)} translated for preview, not all {formatPageCount(totalPages)} in the PDF.
+            </div>
+          ) : null}
 
         </div>
 
@@ -394,7 +410,7 @@ function TranslatedPagePreview({
           <div className="absolute inset-0 z-10">
             <PreviewPlaceholder
               title="Preparing page preview"
-              description="Rendering the selected page..."
+              description="Preparing page preview..."
               originalPreviewUrl={imageUrl || originalPreviewUrl}
               processing
               overlay
@@ -444,7 +460,7 @@ function TranslatedPagePreview({
         ) : (
           <PreviewPlaceholder
             title="Preparing page preview"
-            description="Rendering the selected page..."
+            description="Preparing page preview..."
             originalPreviewUrl={imageUrl || originalPreviewUrl}
             processing
             overlay
@@ -518,13 +534,27 @@ function TranslatePageContent() {
       usage.remainingPages !== null &&
       knownTotalPages > usage.remainingPages
   );
-  const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota;
+  const hasNoFreePreviewPages = Boolean(
+    usage &&
+      isFreePlan &&
+      usage.remainingPages !== null &&
+      usage.remainingPages <= 0
+  );
+  const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota || hasNoFreePreviewPages;
   const isProcessing = Boolean(taskId) && !result;
   const isRestoringCompletedResult = Boolean(initialTaskId && isCompletedHistoryEntry) && !result && (isRestoringCompletedTask || isPreparingPreview);
   const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
   const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
   const previewPageCount = Math.max(result?.translatedPages || result?.pages?.length || progress.translatedPages || progress.requestedPages || knownTotalPages || 1, 1);
   const isPreviewReady = Boolean(result && previewPageImageUrl && !isPreparingPreview && !previewError);
+  const translatedPageCount = result?.translatedPages || progress.translatedPages || progress.requestedPages || 0;
+  const isPartialTranslation = Boolean(result?.isPartial || progress.isPartial || (translatedPageCount > 0 && knownTotalPages > translatedPageCount));
+  const completedTitle = isPartialTranslation
+    ? `Preview translation completed (${formatPageCount(translatedPageCount)})`
+    : 'Translation completed';
+  const completedStatusLabel = isPartialTranslation
+    ? `Preview translation completed: ${formatPageCount(translatedPageCount)}`
+    : 'Translation completed';
 
   const statusSummary = useMemo(() => {
     if (!usage) {
@@ -532,7 +562,7 @@ function TranslatePageContent() {
     }
 
     if (usage.plan === 'free') {
-      return `${formatPlanName(usage.plan)} | Preview: ${usage.freePreviewPages} pages`;
+      return `${formatPlanName(usage.plan)} | Preview: first ${usage.freePreviewPages} pages per PDF | Remaining: ${usage.remainingPages ?? 'No monthly cap'} pages`;
     }
 
     return `${formatPlanName(usage.plan)} | Document: ${knownTotalPages} pages | Remaining: ${usage.remainingPages ?? 'Unlimited'} pages`;
@@ -682,7 +712,7 @@ function TranslatePageContent() {
       return;
     }
     if (isStartBlocked) {
-      setError('This file exceeds your current plan limits. Please upgrade to continue.');
+      setError('Your current plan does not have enough remaining pages. Please upgrade to continue.');
       return;
     }
 
@@ -915,7 +945,7 @@ function TranslatePageContent() {
       }, 0);
       setDownloadToast({
         type: 'success',
-        message: 'Download sent to browser.',
+        message: 'Your download has started.',
       });
     } catch (downloadError) {
       setDownloadToast({
@@ -1011,18 +1041,20 @@ function TranslatePageContent() {
           <div className="flex min-w-[112px] justify-end">
             {isPreviewReady ? (
               <div className="flex items-center gap-2">
-                <div className="group relative">
-                  <button
-                    type="button"
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
-                    aria-label="Download help"
-                  >
-                    <Info className="size-4" strokeWidth={2} />
-                  </button>
-                  <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 w-[320px] rounded-xl border border-slate-200 bg-white p-3 text-left text-[12px] leading-5 text-slate-600 opacity-0 shadow-xl transition-opacity duration-150 group-hover:opacity-100">
-                    Tip: Use the editor&apos;s Save button to keep any annotations. The Download button exports the translated file only.
+                {isPartialTranslation ? (
+                  <div className="group relative">
+                    <button
+                      type="button"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-amber-600 transition-colors hover:bg-amber-50"
+                      aria-label="Partial translation export details"
+                    >
+                      <Info className="size-4" strokeWidth={2} />
+                    </button>
+                    <div className="pointer-events-none absolute right-0 top-[calc(100%+8px)] z-20 w-[320px] rounded-xl border border-amber-200 bg-amber-50 p-3 text-left text-[12px] leading-5 text-amber-800 opacity-0 shadow-xl transition-opacity duration-150 group-hover:opacity-100">
+                      Downloads include only the {formatPageCount(translatedPageCount)} translated for preview.
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
                 <button
                   type="button"
@@ -1042,14 +1074,14 @@ function TranslatePageContent() {
         <PreviewPlaceholder
           title={
             isRestoringCompletedResult
-              ? 'Translation completed'
+              ? completedTitle
               : isStartingTranslation
                 ? 'Translating your document'
                 : 'Ready to translate'
           }
           description={
             isRestoringCompletedResult
-              ? 'Preparing preview PDF...'
+              ? 'Preparing page preview...'
               : isStartingTranslation
               ? 'Please wait while we translate your PDF...'
               : 'Select your target language and click the "Translate" button above to start translating your document.'
@@ -1115,7 +1147,7 @@ function TranslatePageContent() {
       ) : !previewUrl ? (
         <PreviewPlaceholder
           title="Translation completed"
-          description="Preparing preview PDF..."
+          description="Preparing page preview..."
           originalPreviewUrl={originalPreviewUrl}
           processing
           error={previewError}
@@ -1144,7 +1176,8 @@ function TranslatePageContent() {
           <div className="flex flex-wrap items-center gap-3">
             {result ? (
               <>
-                <span className="font-medium text-emerald-600">Translation completed</span>
+                <span className="font-medium text-emerald-600">{completedStatusLabel}</span>
+                {isPartialTranslation ? <span>| Export includes translated preview pages only</span> : null}
                 {usage ? <span>| {formatPlanName(usage.plan)}: {usage.remainingPages ?? 'Unlimited'} pages remaining this month</span> : null}
               </>
             ) : (
@@ -1159,6 +1192,9 @@ function TranslatePageContent() {
       <DownloadModal
         open={isDownloadOpen}
         filename={displayFileName}
+        isPartial={isPartialTranslation}
+        translatedPages={translatedPageCount}
+        totalPages={knownTotalPages}
         onClose={() => setIsDownloadOpen(false)}
         onDownload={handleDownload}
       />

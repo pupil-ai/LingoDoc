@@ -4,7 +4,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'LingoDoc - PDF Translation Service',
-  description: 'Translate large PDF files up to 3000 pages while preserving layout. Bilingual reading support.',
+  description: 'AI-powered PDF translation for review and reading, with bilingual output and support for larger files.',
 };
 
 export default function RootLayout({

@@ -32,7 +32,7 @@ PLAN_LIMITS = {
         plan="free",
         max_pages_per_file=_read_int_env("FREE_MAX_PAGES_PER_FILE", 3),
         max_file_size_mb=_read_int_env("FREE_MAX_FILE_SIZE_MB", 25),
-        monthly_page_quota=_read_int_env("FREE_MONTHLY_PAGE_QUOTA", 0),
+        monthly_page_quota=_read_int_env("FREE_MONTHLY_PAGE_QUOTA", 20),
         free_preview_pages=_read_int_env("FREE_PREVIEW_PAGE_LIMIT", 3),
     ),
     "starter": PlanLimits(

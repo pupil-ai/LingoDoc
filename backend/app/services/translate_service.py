@@ -267,10 +267,10 @@ class OfoxAIService(AioHttpTranslationService):
     def __init__(self) -> None:
         super().__init__()
 
-    def _get_config(self) -> Tuple[str, str, str]:
+    def _get_config(self, model_override: Optional[str] = None) -> Tuple[str, str, str]:
         api_key = os.getenv("OFOXAI_API_KEY")
         base_url = os.getenv("OFOXAI_BASE_URL", "https://api.ofox.ai/v1").rstrip("/")
-        model = os.getenv("OFOXAI_MODEL", "openai/gpt-5.4")
+        model = model_override or os.getenv("OFOXAI_SUBSCRIPTION_MODEL") or os.getenv("OFOXAI_MODEL", "gpt-5.4-mini")
         if not api_key or api_key == "your_ofoxai_api_key_here":
             raise ValueError("OfoxAI API key not configured. Please set OFOXAI_API_KEY in .env file")
         return api_key, base_url, model
@@ -336,6 +336,46 @@ class OfoxAIService(AioHttpTranslationService):
             return []
 
         api_key, base_url, model = self._get_config()
+        return await self._translate_structured_batch_with_config(
+            items,
+            source_lang,
+            target_lang,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+
+    async def translate_structured_batch_with_model(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+        *,
+        model: str,
+    ) -> List[str]:
+        if not items:
+            return []
+
+        api_key, base_url, selected_model = self._get_config(model)
+        return await self._translate_structured_batch_with_config(
+            items,
+            source_lang,
+            target_lang,
+            api_key=api_key,
+            base_url=base_url,
+            model=selected_model,
+        )
+
+    async def _translate_structured_batch_with_config(
+        self,
+        items: List[Dict[str, Any]],
+        source_lang: str,
+        target_lang: str,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+    ) -> List[str]:
         messages = _build_structured_batch_messages(items, source_lang, target_lang)
         raw_response = await self._request_completion(
             messages,
@@ -347,6 +387,13 @@ class OfoxAIService(AioHttpTranslationService):
 
     def get_supported_languages(self) -> List[str]:
         return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+
+
+def get_translation_model_for_plan(plan: Optional[str]) -> str:
+    normalized_plan = (plan or "free").strip().lower()
+    if normalized_plan == "free":
+        return os.getenv("OFOXAI_FREE_MODEL", "gpt-5.4-nano")
+    return os.getenv("OFOXAI_SUBSCRIPTION_MODEL", "gpt-5.4-mini")
 
 
 class MockTranslationService(TranslationService):

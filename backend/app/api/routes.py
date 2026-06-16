@@ -14,7 +14,11 @@ from urllib.parse import urlencode
 
 from app.services.pdf_service import PDFService
 from app.services.pdf_quality_service import build_pdf_quality_report
-from app.services.translate_service import TranslationServiceFactory, safe_print
+from app.services.translate_service import (
+    TranslationServiceFactory,
+    get_translation_model_for_plan,
+    safe_print,
+)
 from app.services.db_service import db_service
 from app.services.storage_service import storage_service
 from app.services.plan_service import (
@@ -583,6 +587,24 @@ def _translation_cache_key(block: Dict[str, Any], source_lang: str, target_lang:
     )
 
 
+async def _translate_structured_batch(
+    translator: Any,
+    items: list[Dict[str, Any]],
+    source_lang: str,
+    target_lang: str,
+    *,
+    model: Optional[str] = None,
+) -> list[str]:
+    if model and hasattr(translator, "translate_structured_batch_with_model"):
+        return await translator.translate_structured_batch_with_model(
+            items,
+            source_lang,
+            target_lang,
+            model=model,
+        )
+    return await translator.translate_structured_batch(items, source_lang, target_lang)
+
+
 def _normalize_translated_block_text(translated_text: str, source_text: str) -> str:
     normalized = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", translated_text).strip()
     normalized = _restore_reference_markers(normalized, source_text)
@@ -602,6 +624,7 @@ async def _translate_batch_with_fallback(
     batch_number: Optional[int] = None,
     translation_cache: Optional[Dict[str, str]] = None,
     cache_lock: Optional[asyncio.Lock] = None,
+    translation_model: Optional[str] = None,
 ) -> Dict[int, str]:
     texts = [str(block.get("text") or "") for _, block in batch]
     cached_translations: Dict[int, str] = {}
@@ -651,7 +674,13 @@ async def _translate_batch_with_fallback(
 
     started_at = time.perf_counter()
     try:
-        unique_translations = await translator.translate_structured_batch(unique_items, source_lang, target_lang)
+        unique_translations = await _translate_structured_batch(
+            translator,
+            unique_items,
+            source_lang,
+            target_lang,
+            model=translation_model,
+        )
         if len(unique_translations) != len(unique_items):
             raise ValueError("Batch translation count mismatch")
         translated_by_key = {
@@ -690,10 +719,12 @@ async def _translate_batch_with_fallback(
         async def translate_one(block_index: int, block: Dict[str, Any]) -> tuple[int, str]:
             async with fallback_semaphore:
                 item = _build_translation_item(block_index, block)
-                translations = await translator.translate_structured_batch(
+                translations = await _translate_structured_batch(
+                    translator,
                     [item],
                     source_lang,
                     target_lang,
+                    model=translation_model,
                 )
                 return block_index, translations[0] if translations else str(block.get("text") or "")
 
@@ -728,6 +759,7 @@ async def _translate_page_blocks(
     page_number: Optional[int] = None,
     translation_cache: Optional[Dict[str, str]] = None,
     cache_lock: Optional[asyncio.Lock] = None,
+    translation_model: Optional[str] = None,
 ) -> list[Dict[str, Any]]:
     translated_blocks = [dict(block) for block in text_blocks]
     batches = _chunk_translatable_blocks(translated_blocks)
@@ -749,6 +781,7 @@ async def _translate_page_blocks(
                 batch_number=batch_index + 1,
                 translation_cache=translation_cache,
                 cache_lock=cache_lock,
+                translation_model=translation_model,
             )
 
     batch_results = await asyncio.gather(*(run_batch(index, batch) for index, batch in enumerate(batches)))
@@ -852,8 +885,10 @@ async def _process_translation_page(
     plan_metadata: Dict[str, Any],
     translation_cache: Optional[Dict[str, str]] = None,
     cache_lock: Optional[asyncio.Lock] = None,
+    translation_model: Optional[str] = None,
 ) -> None:
     attempts = initial_retry_count
+    usage_reserved = False
 
     while attempts <= PAGE_RETRY_LIMIT:
         db_service.update_task_page(
@@ -866,6 +901,22 @@ async def _process_translation_page(
         )
         page_started_at = time.perf_counter()
         try:
+            if not usage_reserved:
+                usage_reserved = db_service.reserve_page_usage_event(
+                    task_id=task_id,
+                    file_id=file_id,
+                    user_id=user_id,
+                    plan=plan_metadata["plan"],
+                    page_number=page_number,
+                    usage_month=plan_metadata.get("usageMonth"),
+                    monthly_page_quota=plan_metadata.get("monthlyPageQuota"),
+                )
+                if not usage_reserved:
+                    raise RuntimeError(
+                        f"Monthly page quota reached for your {plan_metadata['plan']} plan."
+                    )
+                db_service.update_task_page(task_id, page_number, is_billed=True)
+
             extract_started_at = time.perf_counter()
             page_content = pdf_service.extract_page_content(file_id, page_number - 1)
             safe_print(
@@ -881,6 +932,7 @@ async def _process_translation_page(
                 page_number=page_number,
                 translation_cache=translation_cache,
                 cache_lock=cache_lock,
+                translation_model=translation_model,
             )
             page_result = _build_page_result(
                 page_number - 1,
@@ -896,16 +948,6 @@ async def _process_translation_page(
                 last_error="",
                 completed_at=str(time.time()),
             )
-            if db_service.record_page_usage_event(
-                task_id=task_id,
-                file_id=file_id,
-                user_id=user_id,
-                plan=plan_metadata["plan"],
-                page_number=page_number,
-                usage_month=plan_metadata.get("usageMonth"),
-            ):
-                db_service.update_task_page(task_id, page_number, is_billed=True)
-
             safe_print(
                 "[PERF] Page translated: "
                 f"page={page_number} elapsed_ms={(time.perf_counter() - page_started_at) * 1000:.0f}"
@@ -915,6 +957,9 @@ async def _process_translation_page(
             attempts += 1
             safe_print(f"[DEBUG] Page {page_number} translation failed: {page_error}")
             if attempts > PAGE_RETRY_LIMIT:
+                if usage_reserved:
+                    db_service.delete_page_usage_event(task_id, page_number)
+                    db_service.update_task_page(task_id, page_number, is_billed=False)
                 db_service.update_task_page(
                     task_id,
                     page_number,
@@ -1186,7 +1231,12 @@ async def translate_pdf_task(
         db_service.reset_processing_task_pages(task_id)
 
         translator = TranslationServiceFactory.get("ofoxai")
+        translation_model = get_translation_model_for_plan(plan_metadata["plan"])
         safe_print(f"[DEBUG] Translator type: {type(translator).__name__}")
+        safe_print(
+            "[DEBUG] Translation model selected: "
+            f"task_id={task_id} plan={plan_metadata['plan']} model={translation_model}"
+        )
         pending_page_rows = [
             page_row
             for page_row in db_service.list_task_pages(task_id)
@@ -1217,6 +1267,7 @@ async def translate_pdf_task(
                     plan_metadata=plan_metadata,
                     translation_cache=translation_cache,
                     cache_lock=translation_cache_lock,
+                    translation_model=translation_model,
                 )
                 _sync_task_progress(
                     task_id,

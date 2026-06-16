@@ -35,23 +35,26 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
   const remainingPages = usage.remainingPages;
   const percentage = quota > 0 ? Math.min((usedPages / quota) * 100, 100) : 0;
   const isOutOfQuota = remainingPages !== null && remainingPages <= 0;
-  const isFreePreviewMode = usage.plan === 'free' && quota <= 0;
+  const isFreePlan = usage.plan === 'free';
   const planName = formatPlan(usage.plan);
-  const statusBadgeClass = isFreePreviewMode
+  const statusBadgeClass = isFreePlan
     ? 'bg-slate-100 text-slate-700'
     : isOutOfQuota
       ? 'bg-amber-100 text-amber-700'
       : 'bg-emerald-100 text-emerald-700';
-  const statusLabel = isFreePreviewMode
+  const statusLabel = isFreePlan
     ? 'Preview only'
     : isOutOfQuota
       ? 'Quota reached'
       : 'Active';
-  const summaryLabel = isFreePreviewMode
+  const summaryLabel = isFreePlan
     ? 'Current plan'
     : quota > 0
       ? 'Monthly allowance'
       : 'Usage';
+  const limitLabel = isFreePlan
+    ? `Preview limit: first ${usage.freePreviewPages} pages / ${usage.maxFileSizeMB} MB`
+    : `PDF limit: ${usage.maxPagesPerFile} pages / ${usage.maxFileSizeMB} MB`;
 
   return (
     <div className={`rounded-2xl border p-5 shadow-sm ${
@@ -75,7 +78,7 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
 
           <div className="mt-3 flex flex-wrap items-end gap-x-3 gap-y-1">
             <p className="text-2xl font-bold text-gray-900">{planName}</p>
-            {!isFreePreviewMode && quota > 0 && (
+            {quota > 0 && (
               <p className="text-sm font-medium text-gray-500">
                 {formatNumber(usedPages)} used of {formatNumber(quota)} pages
               </p>
@@ -83,8 +86,8 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
           </div>
 
           <p className="mt-2 text-sm text-gray-600">
-            {isFreePreviewMode
-              ? `Free users can preview the first ${usage.freePreviewPages} page${usage.freePreviewPages === 1 ? '' : 's'} of each PDF before upgrading.`
+            {isFreePlan
+              ? `${formatNumber(remainingPages || 0)} preview pages remaining this month. Each PDF translates up to the first ${usage.freePreviewPages} page${usage.freePreviewPages === 1 ? '' : 's'}.`
               : quota > 0
                 ? `${formatNumber(remainingPages || 0)} pages remaining this month. Usage resets monthly.`
                 : `${formatNumber(usedPages)} pages used this month.`}
@@ -93,14 +96,14 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
 
         <div className="text-left md:text-right">
           <p className={`text-lg font-bold ${isOutOfQuota ? 'text-amber-700' : 'text-gray-900'}`}>
-            {isFreePreviewMode
+            {isFreePlan
               ? 'Preview mode'
               : remainingPages === null
                 ? 'Unlimited'
                 : `${formatNumber(remainingPages)} left`}
           </p>
           <p className="text-xs text-gray-500">
-            PDF limit: {usage.maxPagesPerFile} pages / {usage.maxFileSizeMB} MB
+            {limitLabel}
           </p>
         </div>
       </div>
@@ -119,8 +122,8 @@ export function UsageSummaryCard({ usage, isLoading = false, compact = false }: 
           <p className={isOutOfQuota ? 'text-amber-700' : 'text-gray-500'}>
             {isOutOfQuota
               ? 'You have used your monthly quota. Upgrade to continue translating.'
-              : isFreePreviewMode
-                ? `Each PDF translates the first ${usage.freePreviewPages} preview pages. Upgrade for full-document translation.`
+              : isFreePlan
+                ? `Each PDF translates up to the first ${usage.freePreviewPages} preview pages. Upgrade for full-document translation.`
                 : 'Usage resets monthly. Larger plans unlock more pages and bigger files.'}
           </p>
           <a

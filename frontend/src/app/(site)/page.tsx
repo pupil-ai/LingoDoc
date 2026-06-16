@@ -135,7 +135,7 @@ function HomeContent() {
         <section className="page-container flex flex-col items-center pb-20 pt-8 text-center sm:pb-28 sm:pt-14">
           <span className="inline-flex items-center gap-1 rounded-full border border-emerald-100 bg-emerald-50 px-3 py-1 text-[14px] font-semibold text-emerald-600">
             <Sparkles className="size-3" strokeWidth={2} />
-            Powered by Advanced AI
+            AI-powered PDF translation
           </span>
 
           <h1 className="mt-8 max-w-[860px] text-[56px] font-bold leading-[1.1] tracking-[-0.06em] text-slate-900">
@@ -145,8 +145,8 @@ function HomeContent() {
           </h1>
 
           <p className="mt-5 max-w-[720px] text-[17px] leading-relaxed text-slate-600">
-            Preserve original layout, compare source and translation side-by-side,
-            and handle large documents up to 3,000 pages.
+            Translate PDFs for review and reading, compare source and translation side-by-side,
+            and work with larger documents without blocking preview.
           </p>
 
           <div className="mt-12 w-full max-w-[860px]">
@@ -165,7 +165,7 @@ function HomeContent() {
           </div>
 
           <div className="mt-10 flex flex-wrap items-center justify-center gap-x-8 gap-y-3">
-            <FeaturePill>Original layout preserved</FeaturePill>
+            <FeaturePill>Layout-aware translation</FeaturePill>
             <FeaturePill>Side-by-side comparison</FeaturePill>
             <FeaturePill>Bilingual PDF export</FeaturePill>
           </div>
@@ -175,14 +175,14 @@ function HomeContent() {
           <div className="page-container py-16 sm:py-24">
             <p className="text-center text-[12px] font-bold tracking-[0.08em] text-slate-500">WHY LINGODOC</p>
             <h2 className="mt-4 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">
-              Professional translation, simplified
+              PDF translation for review and reading
             </h2>
 
             <div className="mt-16 grid gap-10 lg:grid-cols-3">
               <WhyCard
                 icon={<ShieldCheck className="size-5" strokeWidth={2} />}
-                title="Layout preserved"
-                description="Tables, images, fonts, and formatting stay intact. Your translated document maintains the original structure."
+                title="Layout-aware output"
+                description="Designed to keep tables, images, fonts, and formatting close to the original where possible."
                 accent="bg-gradient-to-br from-slate-900 to-slate-700"
               />
               <WhyCard
@@ -194,7 +194,7 @@ function HomeContent() {
               <WhyCard
                 icon={<FileText className="size-5" strokeWidth={2} />}
                 title="Flexible export"
-                description="Download bilingual PDFs with side-by-side view, or translation-only versions. Supports documents up to 3,000 pages."
+                description="Download bilingual PDFs with side-by-side view, or translation-only versions for larger document workflows."
                 accent="bg-gradient-to-br from-slate-700 to-slate-600"
               />
             </div>
@@ -205,7 +205,7 @@ function HomeContent() {
           <div className="mx-auto max-w-[820px] rounded-[28px] bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 px-8 py-14 text-center text-white shadow-xl">
             <h2 className="text-[48px] font-bold tracking-[-0.05em]">Ready to translate?</h2>
             <p className="mx-auto mt-4 max-w-[620px] text-[17px] leading-relaxed text-slate-300">
-              Professional PDF translation with bilingual output and original layout preservation.
+              PDF translation for review and reading, with bilingual output and layout-aware rendering.
             </p>
             <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
               <button

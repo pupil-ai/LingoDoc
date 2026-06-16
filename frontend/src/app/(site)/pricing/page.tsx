@@ -74,14 +74,14 @@ const plans = [
   {
     key: 'free',
     name: 'Free',
-    subtitle: 'Guest mode',
+    subtitle: 'Free preview',
     monthlyPrice: 0,
     yearlyPrice: 0,
     monthlyPages: 20,
     monthlyPriceId: '',
     yearlyPriceId: '',
-    button: 'Get Started Free',
-    items: ['Core model', '20 pages / month', 'Preview first 3 pages', 'PDF up to 25 MB'],
+    button: 'Get started free',
+    items: ['Core translation model', '20 preview pages / month', 'Preview first 3 pages per PDF', 'PDF up to 25 MB'],
     highlighted: false,
     badge: '',
   },
@@ -95,7 +95,7 @@ const plans = [
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_STARTER_YEARLY_PRICE_ID || '',
     button: 'Choose Starter',
-    items: ['Advanced model', '100 pages / month', 'Up to 50 pages per PDF', 'PDF up to 50 MB', 'File history'],
+    items: ['Advanced translation model', '100 pages / month', 'Up to 50 pages per PDF', 'PDF up to 50 MB', 'File history'],
     highlighted: false,
     badge: '',
   },
@@ -109,9 +109,9 @@ const plans = [
     monthlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_MONTHLY_PRICE_ID || '',
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_PRO_YEARLY_PRICE_ID || '',
     button: 'Choose Pro',
-    items: ['Advanced model', '500 pages / month', 'Up to 300 pages per PDF', 'PDF up to 100 MB', 'File history'],
+    items: ['Advanced translation model', '500 pages / month', 'Up to 300 pages per PDF', 'PDF up to 100 MB', 'File history'],
     highlighted: true,
-    badge: 'Most popular',
+    badge: 'Recommended',
   },
   {
     key: 'power',
@@ -124,13 +124,12 @@ const plans = [
     yearlyPriceId: process.env.NEXT_PUBLIC_PADDLE_POWER_YEARLY_PRICE_ID || '',
     button: 'Choose Power',
     items: [
-      'Advanced model',
+      'Advanced translation model',
       '3,000 pages / month',
-      'Up to 3000 pages per PDF',
+      'Up to 3,000 pages per PDF',
       'PDF up to 250 MB',
       'File history',
       'Designed for long-form documents',
-      'Priority large-file processing later',
       'Best fit for heavy translation needs',
     ],
     highlighted: false,
@@ -174,19 +173,19 @@ function formatPerPagePrice(value: number): string {
 const faqs = [
   {
     title: 'Can I change my plan later?',
-    body: 'Yes, you can upgrade or downgrade at any time. Changes take effect immediately and we will prorate the difference.',
+    body: 'Plan changes are handled through Paddle. Availability may depend on your subscription status.',
   },
   {
     title: 'What payment methods do you accept?',
-    body: 'We accept all major credit cards (Visa, MasterCard, American Express) and PayPal.',
+    body: 'Payment methods are shown at checkout.',
   },
   {
     title: 'Is there a free trial?',
-    body: 'Yes. The Free plan requires no credit card. To prevent abuse, translations are limited to the first 3 pages per document.',
+    body: 'Yes. The Free plan requires no credit card. To prevent abuse, it includes 20 preview pages per month and translates up to the first 3 pages per PDF.',
   },
   {
     title: 'What download formats are available?',
-    body: 'You can download bilingual PDFs (side-by-side view) or translation-only PDFs. Both preserve the original layout and formatting.',
+    body: 'You can download bilingual PDFs (side-by-side view) or translation-only PDFs. Both are designed to keep the original layout close where possible.',
   },
 ];
 
@@ -231,7 +230,7 @@ function ContactModal({ open, onClose }: { open: boolean; onClose: () => void })
           <Mail className="size-8" strokeWidth={2} />
         </div>
 
-        <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Contact Us</h3>
+        <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Contact us</h3>
         <p className="mt-2 text-center text-[16px] text-slate-500">Get in touch with our team for custom solutions</p>
 
         <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -246,7 +245,7 @@ function ContactModal({ open, onClose }: { open: boolean; onClose: () => void })
           </div>
         </div>
 
-        <p className="mt-6 text-center text-[13px] text-slate-400">We typically respond within 24 hours</p>
+        <p className="mt-6 text-center text-[13px] text-slate-400">We'll get back to you as soon as possible.</p>
       </div>
     </div>
   );
@@ -522,7 +521,7 @@ function PricingPageContent() {
 
           <h1 className="mt-5 text-[48px] font-bold tracking-[-0.06em] text-slate-900">Choose your plan</h1>
           <p className="mx-auto mt-4 max-w-[620px] text-[17px] leading-relaxed text-slate-600">
-            Start free, upgrade when you need more. All plans include bilingual PDF output and layout preservation.
+            Start free, upgrade when you need more. All plans include bilingual PDF output and layout-aware rendering.
           </p>
 
           <div className="mt-8 inline-flex rounded-xl bg-slate-100 p-1">
