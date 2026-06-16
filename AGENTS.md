@@ -2,77 +2,168 @@
 
 ## Project Overview
 
-LingoDoc is a PDF translation tool. It uploads PDFs, translates text, previews bilingual pages, and exports bilingual PDFs with the original content on the left and translated content on the right.
+LingoDoc is a stable PDF translation web app with a Next.js frontend and a FastAPI backend. Users sign in with Clerk, upload PDFs, translate them page by page, preview translated pages in the browser, and export either bilingual side-by-side PDFs or translation-only PDFs.
 
-## Core PDF Requirements
+The current implementation is no longer just an early PDF rendering experiment. It includes real authentication, per-user file history, plan-based limits, monthly page usage tracking, Paddle subscription webhooks, local or Cloudflare R2 storage, page-level translation results, cached export jobs, and basic PDF export quality reporting.
 
-- Do not hardcode behavior for one specific PDF, emoji, heading text, author name, or sample document.
-- Preserve the original PDF visual layout as much as possible.
-- The left side of bilingual PDFs should keep the original PDF appearance and text selectability.
-- The right side should preserve the original visual layout, but it must not keep hidden original text selectable underneath translated text.
-- Images, formulas, decorative symbols, and non-text visual elements should not be translated.
-- Translated text should follow the source block style as closely as possible: position, size, color, boldness, alignment, and spacing.
-- Avoid unlimited font shrinking. Prefer readable text, controlled wrapping, and safe overflow handling.
+## Current Architecture
 
-## Current Refactor Goal
+- `frontend/` is a Next.js App Router app using Clerk for auth, Paddle.js for checkout, Tailwind CSS, lucide-react icons, and client-side API helpers in `frontend/src/lib/api.ts`.
+- `backend/` is a FastAPI app. `backend/main.py` loads `backend/.env`, registers CORS middleware, and includes `backend/app/api/routes.py`.
+- `backend/app/api/auth.py` verifies Clerk JWTs with JWKS and provides required/optional current-user dependencies.
+- `backend/app/api/routes.py` owns API orchestration: upload, file listing/deletion, usage summary, translation task lifecycle, page previews, export jobs, export downloads, signed preview/download URLs, and Paddle webhooks.
+- `backend/app/services/plan_service.py` is the source of truth for plan limits and default quotas.
+- `backend/app/services/db_service.py` stores users, files, translation tasks, per-page task state, usage events, and Paddle webhook de-duplication in SQLite.
+- `backend/app/services/storage_service.py` abstracts storage. `STORAGE_PROVIDER=local` stores under `LOCAL_STORAGE_ROOT` or `backend/`; `STORAGE_PROVIDER=r2` stores in Cloudflare R2 and keeps a local cache.
+- `backend/app/services/translate_service.py` defines translation providers. The production translation path currently selects OfoxAI and chooses model by plan.
+- `backend/app/services/pdf_layout_analyzer.py` extracts and classifies PDF text/layout blocks.
+- `backend/app/services/pdf_service.py` renders original previews, translated page previews, translated PDFs, bilingual PDFs, page-level JSON results, cached exports, and export quality reports.
+- `backend/app/services/pdf_quality_service.py` scans translated output metadata for suspicious translation/export issues.
 
-The current priority is to refactor the PDF translation pipeline toward page-based, scalable, approximately faithful rendering instead of patching isolated layout heuristics.
+## Implemented Product Behavior
 
-Primary goals:
+- Upload requires authentication and accepts only PDFs by filename/content type plus `%PDF` header validation.
+- Uploaded file size is enforced server-side from the user's plan.
+- Page count is read from the uploaded PDF and stored with the file record.
+- Starting translation requires ownership of the uploaded file.
+- Free users get monthly preview-page quota and only the first configured pages per PDF are translated.
+- Paid users are blocked when a PDF exceeds their per-file page limit or their remaining monthly page quota.
+- Usage is reserved per translated page and released if that page ultimately fails.
+- Translation task state is persisted in SQLite and mirrored in an in-memory runtime map while active.
+- Recoverable/resumable tasks can be restarted for the same file/language pair.
+- Page translation results are saved independently, so previews can render from page-level JSON.
+- The frontend normally requests result metadata without loading all page JSON.
+- Page preview images are rendered from cached exports when available, otherwise directly from page-level translation results.
+- Full PDF exports are explicit jobs with status polling. Downloads require a ready cached export.
+- Export URLs can be accessed with auth or short-lived signed query parameters.
+- Dashboard history lists user files and latest translation task status, and can delete files plus related outputs.
+- Paddle webhooks update user plan/subscription status and ignore duplicate webhook events.
 
-- PDF output should be approximately faithful to the original layout, with no obvious layout errors, overlaps, blank pages, corrupted text, or mixed paragraphs.
-- Translation speed for normal documents with dozens of pages should be acceptable for interactive use; very large documents such as 3000-page PDFs may be long-running asynchronous jobs.
-- Preview loading must not depend on generating or downloading the full bilingual PDF.
-- Translated pages should become previewable page-by-page as soon as page results are available.
-- Full PDF export should be a separate rendering/export job, not the first-preview path.
-- Prefer page-level data, page-level rendering, and page-level caching over whole-document blocking work.
-- Avoid continuing to add one-off rules to `pdf_service.py` when the underlying problem is missing layout structure or pipeline boundaries.
+## Plan Limits
 
-Architecture direction:
+Plan limits are implemented in code, not only displayed on the pricing page. Defaults in `backend/app/services/plan_service.py` currently match the pricing UI:
 
-- Separate PDF analysis, layout classification, translation orchestration, page preview rendering, and full PDF export into distinct modules when making substantial changes.
-- Build or preserve an intermediate page layout representation before translation.
-- Classify text regions before translation: body, title, header, footer, margin, figure, table, formula, decorative, or unknown.
-- Translate only appropriate text regions; preserve or skip formulas, decorative symbols, repeated marginalia, and non-content running headers/footers unless explicitly required.
-- Use collision-aware layout when placing translated text. Do not allow translated text to overlap adjacent regions.
-- Prefer readable text and controlled wrapping over aggressive font shrinking.
+- Free: 20 preview pages/month, first 3 pages per PDF, PDF up to 25 MB.
+- Starter: 100 pages/month, up to 50 pages per PDF, PDF up to 50 MB.
+- Pro: 500 pages/month, up to 300 pages per PDF, PDF up to 100 MB.
+- Power: 3,000 pages/month, up to 3,000 pages per PDF, PDF up to 250 MB.
 
-Performance direction:
+These values can be overridden with env vars such as `FREE_MAX_PAGES_PER_FILE`, `FREE_MAX_FILE_SIZE_MB`, `FREE_MONTHLY_PAGE_QUOTA`, `FREE_PREVIEW_PAGE_LIMIT`, `STARTER_MAX_PAGES_PER_FILE`, `PRO_MONTHLY_PAGE_QUOTA`, and `POWER_MAX_FILE_SIZE_MB`.
 
-- Use configurable translation concurrency and batching.
-- Use translation caches for repeated text blocks.
-- Avoid reopening and reparsing the same PDF page multiple times when one pass can collect the needed data.
-- Avoid loading huge translation JSON payloads in the frontend.
-- Avoid fetching full PDF blobs into frontend memory before download when a streamed or signed download URL can be used.
+If pricing copy changes, update both:
 
-## PDF Text Layer Notes
+- `frontend/src/app/(site)/pricing/page.tsx`
+- `backend/app/services/plan_service.py`
 
-- Be careful with PDF selection behavior. Hidden text layers can still be selected even if they are covered visually.
-- Do not copy the source PDF as a selectable text layer on the translation side.
-- Do not write an entire translated page as one shared text stream if it causes large-range text selection issues.
-- Prefer paragraph/block-level text insertion for translated content.
-- PDF fixes must be generic for user-uploaded PDFs, not tailored to the current sample document.
+Do not rely on frontend-only checks for billing or quota enforcement.
+
+## PDF Pipeline Notes
+
+- Keep PDF behavior generic. Do not hardcode fixes for one PDF, title, author, emoji, symbol, or sample document.
+- Preserve original page appearance as closely as practical.
+- Bilingual exports place the original page on the left and translated rendering on the right.
+- The original side should remain visually faithful and text-selectable where the source PDF supports it.
+- The translated side must not copy the source PDF text layer underneath translated text.
+- Images, formulas, decorative marks, dense references, vertical text, and metadata-like regions should generally be preserved or skipped rather than translated as normal prose.
+- Translation should operate on layout-aware blocks, not whole pages as one blob.
+- Translated block rendering should preserve approximate position, size, color, alignment, boldness, and spacing.
+- Prefer readable wrapping and bounded fallback behavior over extreme font shrinking.
+- Page-level preview must remain independent from full PDF export. Do not make first preview depend on generating a complete PDF.
+- Keep export caching and page-result caching intact when refactoring rendering.
+- Be careful with selection behavior: visually hidden text in PDFs can still be selectable.
 
 ## Translation Rules
 
-- Do not add explanations, notes, glosses, or parenthetical original terms unless they already exist in the source text.
+- Do not add explanations, notes, glosses, or parenthetical original terms unless they already exist in the source.
 - Do not add artificial line breaks inside a paragraph.
+- Preserve layout markers such as bullets, numbering, emoji, leading symbols, citations, and reference markers.
 - Keep proper nouns, brand names, product names, and common technical terms in their original form when appropriate.
-- Preserve layout markers such as bullets, numbering, emoji, and leading symbols when they are part of the source text.
+- Preserve placeholder/reference tokens exactly when the translation batching code introduces them.
+- Do not merge adjacent blocks, split one block into unrelated blocks, or move content between blocks.
 
-## Validation
+## Important Environment Variables
 
-Before finishing PDF-related changes:
+Backend:
+
+- `CLERK_ISSUER_URL`, optional `CLERK_JWKS_URL`, optional `CLERK_JWT_AUDIENCE`
+- `OFOXAI_API_KEY`, optional `OFOXAI_BASE_URL`, `OFOXAI_FREE_MODEL`, `OFOXAI_SUBSCRIPTION_MODEL`
+- `PADDLE_WEBHOOK_SECRET`, optional `PADDLE_WEBHOOK_TOLERANCE_SECONDS`
+- `PREVIEW_URL_SECRET` for signed preview/download URLs
+- `DATABASE_PATH`
+- `STORAGE_PROVIDER` as `local` or `r2`
+- `LOCAL_STORAGE_ROOT`, `LOCAL_STORAGE_CACHE_DIR`
+- `R2_BUCKET`, `R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`
+- `TRANSLATION_BATCH_MAX_BLOCKS`, `TRANSLATION_BATCH_MAX_CHARS`, `TRANSLATION_BATCH_CONCURRENCY`
+- `TRANSLATION_FALLBACK_CONCURRENCY`, `PAGE_TRANSLATION_CONCURRENCY`, `PAGE_RETRY_LIMIT`
+- `AUTO_PREPARE_EXPORTS`, `AUTO_PREPARE_EXPORT_TYPES`
+- `PDF_PERF_LOGS`
+- plan limit env vars listed above
+
+Frontend:
+
+- `NEXT_PUBLIC_API_BASE_URL`
+- `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+- `NEXT_PUBLIC_PADDLE_CLIENT_TOKEN`
+- `NEXT_PUBLIC_PADDLE_ENVIRONMENT`
+- `NEXT_PUBLIC_PADDLE_STARTER_MONTHLY_PRICE_ID`, `NEXT_PUBLIC_PADDLE_STARTER_YEARLY_PRICE_ID`
+- `NEXT_PUBLIC_PADDLE_PRO_MONTHLY_PRICE_ID`, `NEXT_PUBLIC_PADDLE_PRO_YEARLY_PRICE_ID`
+- `NEXT_PUBLIC_PADDLE_POWER_MONTHLY_PRICE_ID`, `NEXT_PUBLIC_PADDLE_POWER_YEARLY_PRICE_ID`
+
+Do not commit real secrets or production `.env` files.
+
+## Development Commands
+
+Backend:
+
+```powershell
+cd backend
+python -m pip install -r requirements.txt
+python main.py
+```
+
+Frontend:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Validation:
+
+```powershell
+python -m py_compile backend/app/services/pdf_service.py backend/app/api/routes.py backend/app/services/translate_service.py
+cd frontend
+npx.cmd tsc --noEmit
+npm run build
+```
+
+## Deployment Notes
+
+- `backend/main.py` currently allows `allow_origins=["*"]`; lock this down for production domains before public launch.
+- `frontend/next.config.js` rewrites `/api/*` to `http://localhost:8000/api/*` for local development. Production should set `NEXT_PUBLIC_API_BASE_URL` or use platform routing intentionally.
+- Use `PREVIEW_URL_SECRET` in production instead of relying on fallback secrets.
+- R2 is supported, but local storage is easier for development.
+- SQLite is currently the database. If running multiple backend instances, consider that in-memory `translation_tasks` and `export_tasks` are process-local while persisted task/file/user state is in SQLite/storage.
+- Background work uses FastAPI background tasks and in-process asyncio. Large production deployments may need a real queue/worker model before horizontal scaling.
+- Export downloads are intentionally blocked with `409` until an export job has produced a cached PDF.
+- Clean up uploaded files, page JSON, cached exports, local R2 cache, and SQLite backups according to the deployment retention policy.
+
+## Validation Before PDF-Related Changes
 
 - Run `python -m py_compile backend/app/services/pdf_service.py backend/app/api/routes.py backend/app/services/translate_service.py`.
 - If frontend code changes, run `npx.cmd tsc --noEmit` from `frontend`.
-- Generate or export a bilingual PDF and inspect layout, text selection, and downloaded PDF behavior.
-- For PDF pipeline refactors, test first preview load time separately from full PDF export time.
-- When fixtures are available, test at least one multi-column academic PDF, one document with headers/footers, and one document with figures/tables.
-- On Windows, do not pipe inline scripts containing raw CJK or other non-ASCII test text through PowerShell. Use Unicode escapes, a UTF-8 file, or another encoding-safe path so test data is not silently replaced with `?`.
+- For UI-affecting frontend changes, also run `npm run build` from `frontend` when feasible.
+- Upload a real PDF, translate it, preview translated pages, start export jobs for `bilingual` and `translated`, and download both PDFs.
+- Inspect at least one multi-page PDF. When fixtures are available, also test a multi-column academic PDF, a document with headers/footers, and a document with figures/tables.
+- Check that free/paid plan limits still behave as expected after changes touching upload, translation, usage, or billing code.
+- On Windows, do not pipe inline scripts containing raw CJK or other non-ASCII test text through PowerShell. Use Unicode escapes, a UTF-8 file, or another encoding-safe path.
 
 ## Safety
 
 - Do not commit changes unless the user explicitly asks.
-- Do not add secrets, API keys, tokens, or private credentials to the repository.
+- Do not add secrets, API keys, tokens, private credentials, uploaded PDFs, generated exports, SQLite databases, or log files to the repository.
 - Keep changes focused on the requested task and avoid unrelated refactors.
+- Preserve user-owned files and dirty worktree changes.
+- Treat `docs/` and `design/` as user-owned reference/work-in-progress folders. Do not read, edit, summarize, reformat, or use files under those folders unless the user explicitly asks to reference or modify them.
+- Prefer small, verifiable changes over broad rewrites unless the user asks for a refactor.
