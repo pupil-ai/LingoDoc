@@ -230,6 +230,78 @@ function DownloadToast({
   );
 }
 
+function PreviewControls({
+  page,
+  totalPages,
+  zoom,
+  loading,
+  onPageChange,
+  onZoomChange,
+}: {
+  page: number;
+  totalPages: number;
+  zoom: number;
+  loading: boolean;
+  onPageChange: (page: number) => void;
+  onZoomChange: (zoom: number) => void;
+}) {
+  const canGoBack = page > 1 && !loading;
+  const canGoForward = page < totalPages && !loading;
+  const safeTotalPages = Math.max(totalPages, 1);
+
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-5">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onPageChange(page - 1)}
+          disabled={!canGoBack}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="size-4" strokeWidth={2} />
+        </button>
+        <div className="min-w-[112px] text-center text-[13px] font-medium text-slate-600">
+          {page} / {safeTotalPages}
+        </div>
+        <button
+          type="button"
+          onClick={() => onPageChange(page + 1)}
+          disabled={!canGoForward}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+          aria-label="Next page"
+        >
+          <ChevronRight className="size-4" strokeWidth={2} />
+        </button>
+      </div>
+
+      <div className="hidden h-5 w-px bg-slate-200 sm:block" aria-hidden="true" />
+
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onZoomChange(Math.max(0.7, Number((zoom - 0.1).toFixed(2))))}
+          disabled={zoom <= 0.7}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+          aria-label="Zoom out"
+        >
+          <Minus className="size-4" strokeWidth={2} />
+        </button>
+        <div className="min-w-[52px] text-center text-[12px] font-semibold text-slate-500">{Math.round(zoom * 100)}%</div>
+        <button
+          type="button"
+          onClick={() => onZoomChange(Math.min(1.8, Number((zoom + 0.1).toFixed(2))))}
+          disabled={zoom >= 1.8}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
+          aria-label="Zoom in"
+        >
+          <Plus className="size-4" strokeWidth={2} />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TranslatedPagePreview({
   imageUrl,
   page,
@@ -249,60 +321,8 @@ function TranslatedPagePreview({
   onPageChange: (page: number) => void;
   onZoomChange: (zoom: number) => void;
 }) {
-  const canGoBack = page > 1 && !loading;
-  const canGoForward = page < totalPages && !loading;
-  const safeTotalPages = Math.max(totalPages, 1);
-
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-slate-100">
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4">
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onPageChange(page - 1)}
-            disabled={!canGoBack}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-            aria-label="Previous page"
-          >
-            <ChevronLeft className="size-4" strokeWidth={2} />
-          </button>
-          <div className="min-w-[112px] text-center text-[13px] font-medium text-slate-600">
-            {page} / {safeTotalPages}
-          </div>
-          <button
-            type="button"
-            onClick={() => onPageChange(page + 1)}
-            disabled={!canGoForward}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-            aria-label="Next page"
-          >
-            <ChevronRight className="size-4" strokeWidth={2} />
-          </button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => onZoomChange(Math.max(0.7, Number((zoom - 0.1).toFixed(2))))}
-            disabled={zoom <= 0.7}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-            aria-label="Zoom out"
-          >
-            <Minus className="size-4" strokeWidth={2} />
-          </button>
-          <div className="min-w-[52px] text-center text-[12px] font-semibold text-slate-500">{Math.round(zoom * 100)}%</div>
-          <button
-            type="button"
-            onClick={() => onZoomChange(Math.min(1.8, Number((zoom + 0.1).toFixed(2))))}
-            disabled={zoom >= 1.8}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:text-slate-300"
-            aria-label="Zoom in"
-          >
-            <Plus className="size-4" strokeWidth={2} />
-          </button>
-        </div>
-      </div>
-
       <div className="relative min-h-0 flex-1 overflow-auto">
         {loading ? (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/70 backdrop-blur-sm">
@@ -320,7 +340,7 @@ function TranslatedPagePreview({
             </div>
           </div>
         ) : imageUrl ? (
-          <div className="flex min-h-full justify-center px-6 py-6">
+          <div className="flex min-h-full justify-center px-6 py-8">
             <img
               src={imageUrl}
               alt={`Translated preview page ${page}`}
@@ -856,31 +876,37 @@ function TranslatePageContent() {
             <X className="size-4" strokeWidth={2} />
           </button>
 
-          <div className="flex flex-1 justify-center">
-            <div className="flex items-center gap-3">
-              <LanguageSelector
-                sourceLang={sourceLang}
-                targetLang={targetLang}
-                onSourceLangChange={setSourceLang}
-                onTargetLangChange={setTargetLang}
-                disabled={isProcessing || Boolean(result) || isStarting}
-              />
+          <div className="flex flex-1 justify-center px-4">
+            <div className="flex min-w-0 items-center justify-center">
               {result ? (
-                <span className="inline-flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-4 py-1.5 text-[13px] font-medium text-green-700">
-                  <CheckCircle2 className="size-4" strokeWidth={2} />
-                  Complete
-                </span>
+                <PreviewControls
+                  page={previewPage}
+                  totalPages={previewPageCount}
+                  zoom={previewZoom}
+                  loading={isPreparingPreview || isPreviewLoading}
+                  onPageChange={handlePreviewPageChange}
+                  onZoomChange={setPreviewZoom}
+                />
               ) : (
-                <button
-                  type="button"
-                  onClick={startTranslate}
-                  disabled={!isLoaded || !isSignedIn || isProcessing || isStarting || isStartBlocked}
-                  className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold text-white transition-colors ${
-                    isProcessing || isStarting ? 'bg-slate-300 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-700'
-                  } disabled:cursor-not-allowed`}
-                >
-                  {isStarting ? 'Starting...' : isProcessing ? 'Translating...' : 'Translate'}
-                </button>
+                <div className="flex items-center gap-3">
+                  <LanguageSelector
+                    sourceLang={sourceLang}
+                    targetLang={targetLang}
+                    onSourceLangChange={setSourceLang}
+                    onTargetLangChange={setTargetLang}
+                    disabled={isProcessing || Boolean(result) || isStarting}
+                  />
+                  <button
+                    type="button"
+                    onClick={startTranslate}
+                    disabled={!isLoaded || !isSignedIn || isProcessing || isStarting || isStartBlocked}
+                    className={`rounded-lg px-4 py-1.5 text-[13px] font-semibold text-white transition-colors ${
+                      isProcessing || isStarting ? 'bg-slate-300 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-700'
+                    } disabled:cursor-not-allowed`}
+                  >
+                    {isStarting ? 'Starting...' : isProcessing ? 'Translating...' : 'Translate'}
+                  </button>
+                </div>
               )}
             </div>
           </div>
