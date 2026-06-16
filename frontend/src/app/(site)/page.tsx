@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { SignInButton, useAuth } from '@clerk/nextjs';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, ArrowLeftRight, Check, FileText, ShieldCheck, Sparkles } from 'lucide-react';
 import { FileUploader } from '@/components/FileUploader';
@@ -64,9 +65,9 @@ function Footer() {
       <div className="page-container flex flex-col gap-4 py-8 text-[13px] text-slate-400 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-4">
           <span>(c) 2026 LingoDoc</span>
-          <a href="#">Privacy</a>
-          <a href="#">Terms</a>
-          <a href="#">Help</a>
+          <Link href="/privacy">Privacy</Link>
+          <Link href="/terms">Terms</Link>
+          <Link href="/help">Help</Link>
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <span>support@lingodoc.com</span>
