@@ -1,4 +1,5 @@
 import os
+import shutil
 from pathlib import Path
 from typing import Protocol
 
@@ -7,6 +8,9 @@ class StorageService(Protocol):
     provider: str
 
     def save_bytes(self, storage_key: str, content: bytes) -> None:
+        ...
+
+    def save_file(self, storage_key: str, source_path: str) -> None:
         ...
 
     def read_bytes(self, storage_key: str) -> bytes:
@@ -43,6 +47,13 @@ class LocalStorageService:
         target_path = self._resolve_key(storage_key)
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(content)
+
+    def save_file(self, storage_key: str, source_path: str) -> None:
+        target_path = self._resolve_key(storage_key)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        source = Path(source_path).resolve()
+        if source != target_path:
+            shutil.copyfile(source, target_path)
 
     def read_bytes(self, storage_key: str) -> bytes:
         return self._resolve_key(storage_key).read_bytes()
@@ -121,6 +132,16 @@ class R2StorageService:
         clean_key = self._normalize_key(storage_key)
         self.client.put_object(Bucket=self.bucket, Key=clean_key, Body=content)
         self._write_cache(clean_key, content)
+
+    def save_file(self, storage_key: str, source_path: str) -> None:
+        clean_key = self._normalize_key(storage_key)
+        source = Path(source_path).resolve()
+        self.client.upload_file(str(source), self.bucket, clean_key)
+
+        cache_path = self._cache_path(clean_key)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        if source != cache_path:
+            shutil.copyfile(source, cache_path)
 
     def read_bytes(self, storage_key: str) -> bytes:
         clean_key = self._normalize_key(storage_key)

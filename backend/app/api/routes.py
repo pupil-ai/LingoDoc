@@ -1541,27 +1541,17 @@ async def render_export_pdf_task(
     try:
         if not pdf_service.has_cached_export_pdf(task_id, output_type):
             safe_print(f"[PERF] Export job cache miss: task={task_id} output_type={output_type}")
-            export_result = result
-            if not export_result.get("pages"):
-                export_result = await asyncio.to_thread(pdf_service.load_translation_result_with_pages, task_id)
-            if output_type == "translated":
-                pdf_bytes = await asyncio.to_thread(pdf_service.generate_translated_pdf, file_id, export_result)
-            else:
-                pdf_bytes = await asyncio.to_thread(pdf_service.generate_bilingual_pdf, file_id, export_result)
-            await asyncio.to_thread(pdf_service.save_cached_export_pdf, task_id, output_type, pdf_bytes)
+            await asyncio.to_thread(pdf_service.render_cached_export_pdf, task_id, file_id, output_type)
         else:
             safe_print(f"[PERF] Export job cache hit: task={task_id} output_type={output_type}")
 
         elapsed_ms = int((time.perf_counter() - started_at) * 1000)
         size_metadata = _build_export_size_metadata(task_id, file_id, output_type)
-        quality_result = result
-        if not quality_result.get("pages"):
-            quality_result = await asyncio.to_thread(pdf_service.load_translation_result_with_pages, task_id)
         quality_report = await asyncio.to_thread(
             _build_and_save_export_quality_report,
             task_id,
             output_type,
-            quality_result,
+            result,
             size_metadata,
         )
         quality_metadata = _build_quality_response_metadata(quality_report)
@@ -1728,7 +1718,7 @@ async def export_translation(
             format = "pdf"
             output_type = "translated"
 
-        result = pdf_service.load_translation_result_with_pages(task_id)
+        result = pdf_service.load_translation_result(task_id)
         task_owner_id = str(result.get("userId") or "")
 
         has_signed_export_access = (
@@ -1753,6 +1743,7 @@ async def export_translation(
         file_id = result.get("fileId") or task_id
         
         if format == "text":
+            result = pdf_service.load_translation_result_with_pages(task_id)
             content = ""
             for page in result["pages"]:
                 content += f"=== Page {page['pageNum']} ===\n"
@@ -1775,16 +1766,14 @@ async def export_translation(
             if output_type in {"translated", "bilingual"}:
                 export_started_at = time.perf_counter()
                 if not pdf_service.has_cached_export_pdf(task_id, output_type):
-                    safe_print(f"[PERF] Export cache miss: task={task_id} output_type={output_type}")
-                    if output_type == "translated":
-                        pdf_bytes = pdf_service.generate_translated_pdf(file_id, result)
-                    else:
-                        pdf_bytes = pdf_service.generate_bilingual_pdf(file_id, result)
-                    pdf_service.save_cached_export_pdf(task_id, output_type, pdf_bytes)
                     safe_print(
-                        "[PERF] Export cached: "
+                        "[PERF] Export download requested before cache ready: "
                         f"task={task_id} output_type={output_type} "
                         f"elapsed_ms={(time.perf_counter() - export_started_at) * 1000:.0f}"
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Export PDF is not ready. Start an export job before downloading.",
                     )
                 else:
                     safe_print(

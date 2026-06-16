@@ -1,9 +1,10 @@
 import fitz
 import os
 import re
+import tempfile
 import time
 import uuid
-from typing import List, Dict, Any
+from typing import Iterable, Iterator, List, Dict, Any
 
 from app.services.pdf_export_utils import pixmap_to_export_image_bytes, write_optimized_pdf
 from app.services.pdf_font_utils import detect_page_required_scripts, resolve_translation_font_paths
@@ -301,6 +302,19 @@ class PDFService(PDFLayoutAnalyzer):
             page_num += 1
         return page_results
 
+    def iter_page_translation_results(self, task_id: str, page_count: int = None) -> Iterator[Dict[str, Any]]:
+        if page_count is None:
+            result = self.load_translation_result(task_id)
+            page_count = int(
+                result.get("translatedPages")
+                or result.get("requestedPages")
+                or result.get("totalPages")
+                or 0
+            )
+
+        for page_num in range(max(page_count, 0)):
+            yield self.load_page_translation_result(task_id, page_num)
+
     def has_cached_export_pdf(self, task_id: str, output_type: str) -> bool:
         return storage_service.exists(self.get_export_pdf_storage_key(task_id, output_type))
 
@@ -312,6 +326,9 @@ class PDFService(PDFLayoutAnalyzer):
 
     def save_cached_export_pdf(self, task_id: str, output_type: str, pdf_bytes: bytes) -> None:
         storage_service.save_bytes(self.get_export_pdf_storage_key(task_id, output_type), pdf_bytes)
+
+    def save_cached_export_pdf_file(self, task_id: str, output_type: str, pdf_path: str) -> None:
+        storage_service.save_file(self.get_export_pdf_storage_key(task_id, output_type), pdf_path)
 
     def save_export_quality_report(self, task_id: str, output_type: str, report: Dict[str, Any]) -> None:
         import json
@@ -2069,6 +2086,184 @@ class PDFService(PDFLayoutAnalyzer):
             elapsed_ms=_elapsed_ms(started_at),
         )
 
+    def _add_translated_page(self, doc, src_doc, page_data: Dict[str, Any]):
+        page_started_at = time.perf_counter()
+        page_num = page_data["pageNum"] - 1
+        if page_num >= len(src_doc):
+            return None
+
+        src_page = src_doc[page_num]
+        original_rect = src_page.rect
+        new_page = doc.new_page(width=original_rect.width, height=original_rect.height)
+        translated_blocks = self._get_translated_text_blocks(page_data)
+        self._insert_source_page_visual_layer(
+            new_page,
+            src_page,
+            fitz.Rect(0, 0, original_rect.width, original_rect.height),
+            redact_blocks=translated_blocks,
+        )
+        required_scripts = detect_page_required_scripts(page_data)
+        regular_font_path, bold_font_path = resolve_translation_font_paths(required_scripts)
+        (
+            regular_font_name,
+            bold_font_name,
+            regular_measure_font,
+            bold_measure_font,
+        ) = self._register_translation_fonts(
+            new_page,
+            regular_font_path,
+            bold_font_path,
+        )
+        self._render_translated_text_blocks(
+            new_page,
+            src_page,
+            page_data,
+            original_rect,
+            0,
+            original_rect.width,
+            regular_font_name,
+            bold_font_name,
+            regular_measure_font,
+            bold_measure_font,
+        )
+        _pdf_perf_log(
+            "translated_page_rendered",
+            page=page_data.get("pageNum"),
+            blocks=len(translated_blocks),
+            elapsed_ms=_elapsed_ms(page_started_at),
+        )
+        return new_page
+
+    def _write_page_to_document_writer(self, writer, page) -> None:
+        device = writer.begin_page(page.rect)
+        if not hasattr(device, "device") and hasattr(device, "this"):
+            device.device = device.this
+        page.run(device, fitz.Matrix(1, 1))
+        writer.end_page()
+
+    def _write_export_pdf_to_path(
+        self,
+        file_id: str,
+        page_results: Iterable[Dict[str, Any]],
+        output_path: str,
+        output_type: str,
+    ) -> int:
+        input_path = self.get_file_path(file_id)
+        if not os.path.exists(input_path):
+            raise FileNotFoundError("File not found")
+
+        src_doc = fitz.open(input_path)
+        writer = fitz.DocumentWriter(output_path)
+        rendered_pages = 0
+        try:
+            for page_data in page_results:
+                self._clear_render_caches()
+                page_doc = fitz.open()
+                try:
+                    if output_type == "translated":
+                        rendered_page = self._add_translated_page(page_doc, src_doc, page_data)
+                    else:
+                        rendered_page = self._add_bilingual_page(
+                            page_doc,
+                            src_doc,
+                            page_data,
+                            "",
+                            "",
+                        )
+
+                    if rendered_page is None:
+                        continue
+
+                    try:
+                        page_doc.subset_fonts()
+                    except Exception as e:
+                        print(f"[DEBUG] Failed to subset page fonts: {str(e)}")
+
+                    self._write_page_to_document_writer(writer, rendered_page)
+                    rendered_pages += 1
+                finally:
+                    page_doc.close()
+                    self._clear_render_caches()
+        finally:
+            writer.close()
+            src_doc.close()
+
+        return rendered_pages
+
+    def generate_translated_pdf_to_path(
+        self,
+        file_id: str,
+        page_results: Iterable[Dict[str, Any]],
+        output_path: str,
+    ) -> int:
+        started_at = time.perf_counter()
+        rendered_pages = self._write_export_pdf_to_path(file_id, page_results, output_path, "translated")
+        _pdf_perf_log(
+            "translated_pdf_generated",
+            pages=rendered_pages,
+            bytes=os.path.getsize(output_path) if os.path.exists(output_path) else None,
+            elapsed_ms=_elapsed_ms(started_at),
+        )
+        return rendered_pages
+
+    def generate_bilingual_pdf_to_path(
+        self,
+        file_id: str,
+        page_results: Iterable[Dict[str, Any]],
+        output_path: str,
+    ) -> int:
+        started_at = time.perf_counter()
+        rendered_pages = self._write_export_pdf_to_path(file_id, page_results, output_path, "bilingual")
+        _pdf_perf_log(
+            "bilingual_pdf_generated",
+            pages=rendered_pages,
+            bytes=os.path.getsize(output_path) if os.path.exists(output_path) else None,
+            elapsed_ms=_elapsed_ms(started_at),
+        )
+        return rendered_pages
+
+    def render_cached_export_pdf(self, task_id: str, file_id: str, output_type: str) -> int:
+        result = self.load_translation_result(task_id)
+        page_count = int(
+            result.get("translatedPages")
+            or result.get("requestedPages")
+            or result.get("totalPages")
+            or 0
+        )
+        if page_count <= 0:
+            raise FileNotFoundError("Page results not found")
+
+        export_dir = os.path.join(self.output_dir, task_id, "exports")
+        os.makedirs(export_dir, exist_ok=True)
+
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix=f"{task_id}_{output_type}_",
+            suffix=".pdf",
+            dir=export_dir,
+            delete=False,
+        )
+        temp_path = temp_file.name
+        temp_file.close()
+
+        try:
+            page_results = self.iter_page_translation_results(task_id, page_count)
+            if output_type == "translated":
+                rendered_pages = self.generate_translated_pdf_to_path(file_id, page_results, temp_path)
+            else:
+                rendered_pages = self.generate_bilingual_pdf_to_path(file_id, page_results, temp_path)
+
+            if rendered_pages <= 0:
+                raise FileNotFoundError("No translated pages were rendered")
+
+            self.save_cached_export_pdf_file(task_id, output_type, temp_path)
+            return rendered_pages
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
     def generate_translated_pdf(self, file_id: str, translation_result: Dict[str, Any]) -> bytes:
         started_at = time.perf_counter()
         input_path = self.get_file_path(file_id)
@@ -2081,52 +2276,8 @@ class PDFService(PDFLayoutAnalyzer):
             self._clear_render_caches()
             rendered_pages = 0
             for page_data in translation_result["pages"]:
-                page_started_at = time.perf_counter()
-                page_num = page_data["pageNum"] - 1
-                if page_num >= len(src_doc):
-                    continue
-
-                src_page = src_doc[page_num]
-                original_rect = src_page.rect
-                new_page = doc.new_page(width=original_rect.width, height=original_rect.height)
-                translated_blocks = self._get_translated_text_blocks(page_data)
-                self._insert_source_page_visual_layer(
-                    new_page,
-                    src_page,
-                    fitz.Rect(0, 0, original_rect.width, original_rect.height),
-                    redact_blocks=translated_blocks,
-                )
-                required_scripts = detect_page_required_scripts(page_data)
-                regular_font_path, bold_font_path = resolve_translation_font_paths(required_scripts)
-                (
-                    regular_font_name,
-                    bold_font_name,
-                    regular_measure_font,
-                    bold_measure_font,
-                ) = self._register_translation_fonts(
-                    new_page,
-                    regular_font_path,
-                    bold_font_path,
-                )
-                self._render_translated_text_blocks(
-                    new_page,
-                    src_page,
-                    page_data,
-                    original_rect,
-                    0,
-                    original_rect.width,
-                    regular_font_name,
-                    bold_font_name,
-                    regular_measure_font,
-                    bold_measure_font,
-                )
-                rendered_pages += 1
-                _pdf_perf_log(
-                    "translated_page_rendered",
-                    page=page_data.get("pageNum"),
-                    blocks=len(translated_blocks),
-                    elapsed_ms=_elapsed_ms(page_started_at),
-                )
+                if self._add_translated_page(doc, src_doc, page_data) is not None:
+                    rendered_pages += 1
 
             write_started_at = time.perf_counter()
             pdf_bytes = write_optimized_pdf(doc)

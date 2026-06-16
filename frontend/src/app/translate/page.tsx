@@ -306,16 +306,52 @@ function PreviewControls({
   );
 }
 
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const updateSize = (width: number, height: number) => {
+      setSize((current) => {
+        if (current.width === width && current.height === height) {
+          return current;
+        }
+
+        return { width, height };
+      });
+    };
+
+    updateSize(node.clientWidth, node.clientHeight);
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) {
+        return;
+      }
+
+      updateSize(entry.contentRect.width, entry.contentRect.height);
+    });
+
+    observer.observe(node);
+
+    return () => observer.disconnect();
+  }, []);
+
+  return [ref, size] as const;
+}
+
 function TranslatedPagePreview({
   imageUrl,
   page,
-  totalPages,
   zoom,
   loading,
   error,
   originalPreviewUrl,
-  onPageChange,
-  onZoomChange,
 }: {
   imageUrl: string | null;
   page: number;
@@ -327,9 +363,33 @@ function TranslatedPagePreview({
   onPageChange: (page: number) => void;
   onZoomChange: (zoom: number) => void;
 }) {
+  const previewPadding = 24;
+  const [previewViewportRef, previewViewportSize] = useElementSize<HTMLDivElement>();
+  const [imageNaturalSize, setImageNaturalSize] = useState({ width: 0, height: 0 });
+  const fitScale = useMemo(() => {
+    if (!imageUrl || !imageNaturalSize.width || !imageNaturalSize.height || !previewViewportSize.width || !previewViewportSize.height) {
+      return 1;
+    }
+
+    const availableWidth = Math.max(previewViewportSize.width - previewPadding * 2, 1);
+    const availableHeight = Math.max(previewViewportSize.height - previewPadding * 2, 1);
+
+    return Math.min(availableWidth / imageNaturalSize.width, availableHeight / imageNaturalSize.height, 1);
+  }, [imageNaturalSize.height, imageNaturalSize.width, imageUrl, previewViewportSize.height, previewViewportSize.width]);
+  const displayScale = fitScale * zoom;
+  const renderWidth = imageNaturalSize.width ? Math.round(imageNaturalSize.width * displayScale) : 0;
+  const renderHeight = imageNaturalSize.height ? Math.round(imageNaturalSize.height * displayScale) : 0;
+  const isPreviewOverflowing =
+    renderWidth > Math.max(previewViewportSize.width - previewPadding * 2, 0) ||
+    renderHeight > Math.max(previewViewportSize.height - previewPadding * 2, 0);
+
+  useEffect(() => {
+    setImageNaturalSize({ width: 0, height: 0 });
+  }, [imageUrl]);
+
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-slate-100">
-      <div className="relative min-h-0 flex-1 overflow-auto">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-100">
+      <div ref={previewViewportRef} className="relative min-h-0 flex-1 overflow-auto overscroll-contain">
         {loading ? (
           <div className="absolute inset-0 z-10">
             <PreviewPlaceholder
@@ -349,12 +409,36 @@ function TranslatedPagePreview({
             </div>
           </div>
         ) : imageUrl ? (
-          <div className="flex min-h-full justify-center px-6 py-8">
+          <div
+            className={`flex h-full min-h-full w-full p-6 ${
+              isPreviewOverflowing ? 'items-start justify-center' : 'items-center justify-center'
+            }`}
+          >
             <img
               src={imageUrl}
               alt={`Translated preview page ${page}`}
-              style={{ width: `${Math.round(100 * zoom)}%`, maxWidth: `${Math.round(1800 * zoom)}px` }}
-              className="h-auto self-start border border-slate-200 bg-white shadow-sm"
+              onLoad={(event) => {
+                const { naturalWidth, naturalHeight } = event.currentTarget;
+                setImageNaturalSize((current) => {
+                  if (current.width === naturalWidth && current.height === naturalHeight) {
+                    return current;
+                  }
+
+                  return { width: naturalWidth, height: naturalHeight };
+                });
+              }}
+              style={
+                renderWidth
+                  ? {
+                      width: `${renderWidth}px`,
+                      height: 'auto',
+                    }
+                  : {
+                      maxWidth: '100%',
+                      maxHeight: '100%',
+                    }
+              }
+              className="shrink-0 border border-slate-200 bg-white object-contain shadow-sm"
             />
           </div>
         ) : (
@@ -794,13 +878,13 @@ function TranslatePageContent() {
         throw new Error(exportJob.error || 'Failed to prepare export file.');
       }
 
-      const maxPolls = 180;
+      const maxPolls = 7200;
       for (let attempt = 0; exportJob.status !== 'ready' && attempt < maxPolls; attempt += 1) {
         setDownloadToast({
           type: 'loading',
           message: type === 'bilingual' ? 'Rendering bilingual PDF...' : 'Rendering translation-only PDF...',
         });
-        await wait(1000);
+        await wait(2000);
         exportJob = await getExportJob(taskId, type, token);
         if (exportJob.status === 'error') {
           throw new Error(exportJob.error || 'Failed to prepare export file.');
@@ -877,8 +961,8 @@ function TranslatePageContent() {
   }
 
   return (
-    <div className="app-shell flex h-screen flex-col overflow-hidden bg-white">
-      <div className="border-b border-slate-100 bg-white">
+    <div className="app-shell fixed inset-0 flex h-[100dvh] max-h-[100dvh] flex-col overflow-hidden bg-white">
+      <div className="shrink-0 border-b border-slate-100 bg-white">
         <div className="flex h-14 w-full items-center justify-between px-4">
           <button
             type="button"
@@ -1050,7 +1134,7 @@ function TranslatePageContent() {
         />
       )}
 
-      <div className="border-t border-slate-100 bg-white px-4 text-[12px] text-slate-400">
+      <div className="shrink-0 border-t border-slate-100 bg-white px-4 text-[12px] text-slate-400">
         <div className="flex h-9 w-full flex-col justify-center gap-1 overflow-hidden sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-wrap items-center gap-3">
             <span>Document: {displayFileName}</span>
