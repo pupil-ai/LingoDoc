@@ -231,9 +231,11 @@ function ContactModal({ open, onClose }: { open: boolean; onClose: () => void })
         </div>
 
         <h3 className="mt-5 text-center text-[28px] font-bold tracking-[-0.04em] text-slate-900">Contact us</h3>
-        <p className="mt-2 text-center text-[16px] text-slate-500">Get in touch with our team for custom solutions</p>
+        <p className="mx-auto mt-2 max-w-[320px] text-center text-[16px] leading-6 text-slate-500">
+          We&apos;ll get back to you after we receive your message.
+        </p>
 
-        <div className="mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+        <div className="mb-5 mt-8 rounded-2xl border border-slate-200 bg-slate-50 p-4">
           <div className="flex items-center gap-4">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-400">
               <Mail className="size-5" strokeWidth={2} />
@@ -244,8 +246,6 @@ function ContactModal({ open, onClose }: { open: boolean; onClose: () => void })
             </div>
           </div>
         </div>
-
-        <p className="mt-6 text-center text-[13px] text-slate-400">We'll get back to you as soon as possible.</p>
       </div>
     </div>
   );
@@ -581,16 +581,16 @@ function PricingPageContent() {
         </section>
 
         <section className="mx-auto mt-20 max-w-[980px] rounded-2xl border border-slate-200 bg-slate-50 px-8 py-12 text-center">
-          <h2 className="text-[28px] font-bold tracking-[-0.04em] text-slate-900">Need a custom solution?</h2>
+          <h2 className="text-[28px] font-bold tracking-[-0.04em] text-slate-900">Need help?</h2>
           <p className="mx-auto mt-3 max-w-[540px] text-[16px] leading-relaxed text-slate-600">
-            We offer custom plans for users with specific requirements.
+            If you run into any issues, send us a message and we&apos;ll get back to you.
           </p>
           <button
             type="button"
             onClick={() => setIsContactOpen(true)}
             className="mt-7 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
           >
-            Contact our sales team
+            Contact us
           </button>
         </section>
       </main>

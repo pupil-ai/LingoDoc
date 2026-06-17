@@ -63,6 +63,9 @@ class PDFService(PDFLayoutAnalyzer):
         self._page_image_rect_cache = {}
 
     PREVIEW_VISUAL_LAYER_SCALE = 1.25
+    TRANSLATED_EXPORT_BATCH_SIZE = 100
+    BILINGUAL_EXPORT_BATCH_SIZE = 50
+
     def get_file_storage_key(self, file_id: str) -> str:
         return f"uploads/{file_id}.pdf"
 
@@ -2134,12 +2137,122 @@ class PDFService(PDFLayoutAnalyzer):
         )
         return new_page
 
-    def _write_page_to_document_writer(self, writer, page) -> None:
-        device = writer.begin_page(page.rect)
-        if not hasattr(device, "device") and hasattr(device, "this"):
-            device.device = device.this
-        page.run(device, fitz.Matrix(1, 1))
-        writer.end_page()
+    def _get_export_batch_size(self, output_type: str) -> int:
+        env_name = (
+            "PDF_TRANSLATED_EXPORT_BATCH_SIZE"
+            if output_type == "translated"
+            else "PDF_BILINGUAL_EXPORT_BATCH_SIZE"
+        )
+        default_size = (
+            self.TRANSLATED_EXPORT_BATCH_SIZE
+            if output_type == "translated"
+            else self.BILINGUAL_EXPORT_BATCH_SIZE
+        )
+        try:
+            return max(1, int(os.getenv(env_name, str(default_size))))
+        except ValueError:
+            return default_size
+
+    def _create_temp_export_path(self, export_dir: str, prefix: str) -> str:
+        temp_file = tempfile.NamedTemporaryFile(
+            prefix=prefix,
+            suffix=".pdf",
+            dir=export_dir,
+            delete=False,
+        )
+        temp_path = temp_file.name
+        temp_file.close()
+        return temp_path
+
+    def _save_export_document(self, doc, output_path: str) -> None:
+        if os.path.exists(output_path):
+            os.remove(output_path)
+        doc.save(output_path, deflate=True, garbage=4, clean=True)
+
+    def _render_export_batch_to_path(
+        self,
+        src_doc,
+        page_batch: List[Dict[str, Any]],
+        batch_path: str,
+        output_type: str,
+    ) -> int:
+        batch_started_at = time.perf_counter()
+        doc = fitz.open()
+        rendered_pages = 0
+        try:
+            for page_data in page_batch:
+                self._clear_render_caches()
+                if output_type == "translated":
+                    rendered_page = self._add_translated_page(doc, src_doc, page_data)
+                else:
+                    rendered_page = self._add_bilingual_page(
+                        doc,
+                        src_doc,
+                        page_data,
+                        "",
+                        "",
+                    )
+
+                if rendered_page is not None:
+                    rendered_pages += 1
+
+            if rendered_pages <= 0:
+                return 0
+
+            try:
+                doc.subset_fonts()
+            except Exception as e:
+                print(f"[DEBUG] Failed to subset export batch fonts: {str(e)}")
+
+            write_started_at = time.perf_counter()
+            self._save_export_document(doc, batch_path)
+            _pdf_perf_log(
+                "export_batch_written",
+                output_type=output_type,
+                pages=rendered_pages,
+                bytes=os.path.getsize(batch_path) if os.path.exists(batch_path) else None,
+                write_ms=_elapsed_ms(write_started_at),
+                elapsed_ms=_elapsed_ms(batch_started_at),
+            )
+        finally:
+            doc.close()
+            self._clear_render_caches()
+
+        return rendered_pages
+
+    def _merge_export_batches(self, batch_paths: List[str], output_path: str) -> None:
+        if not batch_paths:
+            raise FileNotFoundError("No export batches were rendered")
+
+        if len(batch_paths) == 1:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            os.replace(batch_paths[0], output_path)
+            batch_paths.clear()
+            return
+
+        merge_started_at = time.perf_counter()
+        final_doc = fitz.open()
+        try:
+            for batch_path in batch_paths:
+                batch_doc = fitz.open(batch_path)
+                try:
+                    final_doc.insert_pdf(batch_doc)
+                finally:
+                    batch_doc.close()
+
+            write_started_at = time.perf_counter()
+            self._save_export_document(final_doc, output_path)
+            _pdf_perf_log(
+                "export_batches_merged",
+                batches=len(batch_paths),
+                pages=len(final_doc),
+                bytes=os.path.getsize(output_path) if os.path.exists(output_path) else None,
+                write_ms=_elapsed_ms(write_started_at),
+                elapsed_ms=_elapsed_ms(merge_started_at),
+            )
+        finally:
+            final_doc.close()
 
     def _write_export_pdf_to_path(
         self,
@@ -2153,40 +2266,54 @@ class PDFService(PDFLayoutAnalyzer):
             raise FileNotFoundError("File not found")
 
         src_doc = fitz.open(input_path)
-        writer = fitz.DocumentWriter(output_path)
+        export_dir = os.path.dirname(output_path) or self.output_dir
+        batch_size = self._get_export_batch_size(output_type)
+        batch_paths: List[str] = []
+        page_batch: List[Dict[str, Any]] = []
         rendered_pages = 0
         try:
             for page_data in page_results:
-                self._clear_render_caches()
-                page_doc = fitz.open()
+                page_batch.append(page_data)
+                if len(page_batch) < batch_size:
+                    continue
+
+                batch_path = self._create_temp_export_path(export_dir, f"{output_type}_batch_")
                 try:
-                    if output_type == "translated":
-                        rendered_page = self._add_translated_page(page_doc, src_doc, page_data)
-                    else:
-                        rendered_page = self._add_bilingual_page(
-                            page_doc,
-                            src_doc,
-                            page_data,
-                            "",
-                            "",
-                        )
+                    batch_rendered_pages = self._render_export_batch_to_path(src_doc, page_batch, batch_path, output_type)
+                except Exception:
+                    if os.path.exists(batch_path):
+                        os.remove(batch_path)
+                    raise
+                if batch_rendered_pages > 0:
+                    batch_paths.append(batch_path)
+                    rendered_pages += batch_rendered_pages
+                elif os.path.exists(batch_path):
+                    os.remove(batch_path)
+                page_batch = []
 
-                    if rendered_page is None:
-                        continue
+            if page_batch:
+                batch_path = self._create_temp_export_path(export_dir, f"{output_type}_batch_")
+                try:
+                    batch_rendered_pages = self._render_export_batch_to_path(src_doc, page_batch, batch_path, output_type)
+                except Exception:
+                    if os.path.exists(batch_path):
+                        os.remove(batch_path)
+                    raise
+                if batch_rendered_pages > 0:
+                    batch_paths.append(batch_path)
+                    rendered_pages += batch_rendered_pages
+                elif os.path.exists(batch_path):
+                    os.remove(batch_path)
 
-                    try:
-                        page_doc.subset_fonts()
-                    except Exception as e:
-                        print(f"[DEBUG] Failed to subset page fonts: {str(e)}")
-
-                    self._write_page_to_document_writer(writer, rendered_page)
-                    rendered_pages += 1
-                finally:
-                    page_doc.close()
-                    self._clear_render_caches()
+            self._merge_export_batches(batch_paths, output_path)
         finally:
-            writer.close()
             src_doc.close()
+            for batch_path in batch_paths:
+                if os.path.exists(batch_path):
+                    try:
+                        os.remove(batch_path)
+                    except OSError:
+                        pass
 
         return rendered_pages
 

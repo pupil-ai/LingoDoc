@@ -509,6 +509,7 @@ function TranslatePageContent() {
   const [error, setError] = useState('');
   const [isDownloadOpen, setIsDownloadOpen] = useState(false);
   const [downloadingType, setDownloadingType] = useState<DownloadType | null>(null);
+  const [downloadButtonLabel, setDownloadButtonLabel] = useState('Download');
   const [downloadToast, setDownloadToast] = useState<ToastState>(null);
   const isCompletedHistoryEntry = initialTaskStatus === 'completed';
   const isProcessingHistoryEntry = initialTaskStatus === 'processing';
@@ -897,10 +898,8 @@ function TranslatePageContent() {
 
     setIsDownloadOpen(false);
     setDownloadingType(type);
-    setDownloadToast({
-      type: 'loading',
-      message: type === 'bilingual' ? 'Preparing bilingual PDF...' : 'Preparing translation-only PDF...',
-    });
+    setDownloadButtonLabel('Preparing...');
+    setDownloadToast(null);
     try {
       const token = await getToken({ skipCache: true });
       let exportJob = await startExportJob(taskId, type, token);
@@ -910,10 +909,7 @@ function TranslatePageContent() {
 
       const maxPolls = 7200;
       for (let attempt = 0; exportJob.status !== 'ready' && attempt < maxPolls; attempt += 1) {
-        setDownloadToast({
-          type: 'loading',
-          message: type === 'bilingual' ? 'Rendering bilingual PDF...' : 'Rendering translation-only PDF...',
-        });
+        setDownloadButtonLabel('Preparing...');
         await wait(2000);
         exportJob = await getExportJob(taskId, type, token);
         if (exportJob.status === 'error') {
@@ -925,10 +921,7 @@ function TranslatePageContent() {
         throw new Error('Export is still rendering. Please try again in a moment.');
       }
 
-      setDownloadToast({
-        type: 'loading',
-        message: 'Starting download...',
-      });
+      setDownloadButtonLabel('Downloading...');
       if (!exportJob.downloadUrl) {
         throw new Error('Download URL is not ready. Please try again in a moment.');
       }
@@ -954,6 +947,7 @@ function TranslatePageContent() {
       });
     } finally {
       setDownloadingType(null);
+      setDownloadButtonLabel('Download');
     }
   };
 
@@ -1059,10 +1053,15 @@ function TranslatePageContent() {
                 <button
                   type="button"
                   onClick={() => setIsDownloadOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800"
+                  disabled={Boolean(downloadingType)}
+                  className="inline-flex min-w-[116px] items-center justify-center gap-2 rounded-lg bg-slate-900 px-4 py-2 text-[13px] font-semibold text-white transition-colors hover:bg-slate-800 disabled:cursor-wait disabled:bg-slate-700"
                 >
-                  <Download className="size-4" strokeWidth={2} />
-                  Download
+                  {downloadingType ? (
+                    <Loader2 className="size-4 animate-spin" strokeWidth={2} />
+                  ) : (
+                    <Download className="size-4" strokeWidth={2} />
+                  )}
+                  {downloadButtonLabel}
                 </button>
               </div>
             ) : null}
