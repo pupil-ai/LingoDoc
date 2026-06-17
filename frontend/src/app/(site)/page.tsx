@@ -1,15 +1,22 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { SignInButton, useAuth } from '@clerk/nextjs';
+import { useAuth } from '@clerk/nextjs';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowRight, ArrowLeftRight, Check, FileText, ShieldCheck, Sparkles } from 'lucide-react';
 import { FileUploader } from '@/components/FileUploader';
 import { uploadFile } from '@/lib/api';
 
-const SIGN_IN_UPLOAD_ERROR = 'Please sign in before uploading a file.';
-const SESSION_EXPIRED_ERROR = 'Your login session has expired. Please sign in again before uploading a file.';
+const SIGN_IN_UPLOAD_ERROR = 'Please sign in to upload a PDF.';
+const SESSION_EXPIRED_ERROR = 'Please sign in again to upload your PDF.';
+const AUTH_LOADING_ERROR = 'Getting your account ready. Try again in a moment.';
+const AUTH_LOAD_TIMEOUT_ERROR = "We couldn't load your account. Refresh the page and try again.";
+
+type UploadNotice = {
+  tone: 'warning' | 'error';
+  message: string;
+};
 
 function ClerkSetupRequired() {
   return (
@@ -83,32 +90,58 @@ function HomeContent() {
   const router = useRouter();
   const { getToken, isLoaded, isSignedIn } = useAuth();
   const [isUploading, setIsUploading] = useState(false);
-  const [error, setError] = useState('');
+  const [uploadNotice, setUploadNotice] = useState<UploadNotice | null>(null);
+  const [authLoadTimedOut, setAuthLoadTimedOut] = useState(false);
+  const [noticeShakeKey, setNoticeShakeKey] = useState(0);
 
   useEffect(() => {
-    if (isSignedIn && error === SIGN_IN_UPLOAD_ERROR) {
-      setError('');
+    if (isSignedIn && uploadNotice?.message === SIGN_IN_UPLOAD_ERROR) {
+      setUploadNotice(null);
     }
-  }, [error, isSignedIn]);
+  }, [isSignedIn, uploadNotice?.message]);
 
   useEffect(() => {
     router.prefetch('/translate');
   }, [router]);
 
-  const handleFileUpload = async (file: File) => {
-    if (!isLoaded) {
-      setError('Please wait while your account finishes loading.');
+  useEffect(() => {
+    if (isLoaded) {
+      setAuthLoadTimedOut(false);
       return;
     }
 
+    const timeout = window.setTimeout(() => {
+      setAuthLoadTimedOut(true);
+    }, 5000);
+
+    return () => window.clearTimeout(timeout);
+  }, [isLoaded]);
+
+  const handleFileUpload = async (file: File) => {
+    if (!isLoaded) {
+      setUploadNotice({
+        tone: 'warning',
+        message: authLoadTimedOut ? AUTH_LOAD_TIMEOUT_ERROR : AUTH_LOADING_ERROR,
+      });
+      return false;
+    }
+
+    if (!isSignedIn) {
+      setUploadNotice({ tone: 'warning', message: SIGN_IN_UPLOAD_ERROR });
+      return false;
+    }
+
     setIsUploading(true);
-    setError('');
+    setUploadNotice(null);
 
     try {
       const token = await getToken({ skipCache: true });
       if (!token) {
-        setError(isSignedIn ? SESSION_EXPIRED_ERROR : SIGN_IN_UPLOAD_ERROR);
-        return;
+        setUploadNotice({
+          tone: 'warning',
+          message: isSignedIn ? SESSION_EXPIRED_ERROR : SIGN_IN_UPLOAD_ERROR,
+        });
+        return false;
       }
       const response = await uploadFile(file, token);
       if (!response.success) {
@@ -123,12 +156,38 @@ function HomeContent() {
         targetLang: 'zh',
       });
       router.push(`/translate?${params.toString()}`);
+      return true;
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : 'An error occurred during upload.');
+      setUploadNotice({
+        tone: 'error',
+        message: uploadError instanceof Error ? uploadError.message : 'An error occurred during upload.',
+      });
+      return false;
     } finally {
       setIsUploading(false);
     }
   };
+
+  const handleBlockedUploadAttempt = () => {
+    setUploadNotice({
+      tone: 'warning',
+      message: !isLoaded
+        ? authLoadTimedOut
+          ? AUTH_LOAD_TIMEOUT_ERROR
+          : AUTH_LOADING_ERROR
+        : SIGN_IN_UPLOAD_ERROR,
+    });
+    setNoticeShakeKey((key) => key + 1);
+  };
+
+  const visibleUploadNotice =
+    uploadNotice ||
+    (isLoaded && !isSignedIn
+      ? {
+          tone: 'warning' as const,
+          message: SIGN_IN_UPLOAD_ERROR,
+        }
+      : null);
 
   return (
     <div className="app-shell">
@@ -151,17 +210,22 @@ function HomeContent() {
           </p>
 
           <div className="mt-12 w-full max-w-[860px]">
-            <FileUploader onFileUpload={handleFileUpload} disabled={isUploading || !isLoaded} keepLoadingOnSuccess />
+            <FileUploader
+              onFileUpload={handleFileUpload}
+              disabled={isUploading}
+              keepLoadingOnSuccess
+              onBlockedUploadAttempt={!isLoaded || !isSignedIn ? handleBlockedUploadAttempt : undefined}
+            />
             <p className="mt-4 text-center text-[12px] font-medium text-slate-400">Supports large PDF files</p>
-            {error && <p className="mt-4 text-center text-sm font-semibold text-red-600">{error}</p>}
-            {!isSignedIn && isLoaded && (
-              <div className="mt-6">
-                <SignInButton mode="modal">
-                  <button className="inline-flex items-center rounded-lg border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-900 transition-all hover:bg-slate-50">
-                    Sign in to upload
-                  </button>
-                </SignInButton>
-              </div>
+            {visibleUploadNotice && (
+              <p
+                key={noticeShakeKey}
+                className={`mt-4 text-center text-sm font-semibold ${
+                  visibleUploadNotice.tone === 'warning' ? 'text-amber-700' : 'text-red-600'
+                } ${noticeShakeKey > 0 ? 'animate-upload-notice-shake' : ''}`}
+              >
+                {visibleUploadNotice.message}
+              </p>
             )}
           </div>
 

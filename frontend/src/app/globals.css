@@ -111,6 +111,34 @@ textarea {
   transform: translateY(-1px);
 }
 
+@keyframes upload-notice-shake {
+  0%, 100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-4px);
+  }
+  40% {
+    transform: translateX(4px);
+  }
+  60% {
+    transform: translateX(-3px);
+  }
+  80% {
+    transform: translateX(3px);
+  }
+}
+
+.animate-upload-notice-shake {
+  animation: upload-notice-shake 320ms ease-in-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-upload-notice-shake {
+    animation: none;
+  }
+}
+
 @media (max-width: 640px) {
   .page-container {
     padding-left: 16px;

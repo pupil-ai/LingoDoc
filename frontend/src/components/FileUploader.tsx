@@ -5,18 +5,24 @@ import { useCallback, useRef, useState } from 'react';
 import { Loader2, Upload } from 'lucide-react';
 
 interface FileUploaderProps {
-  onFileUpload: (file: File) => void | Promise<void>;
+  onFileUpload: (file: File) => boolean | void | Promise<boolean | void>;
   disabled?: boolean;
   keepLoadingOnSuccess?: boolean;
+  onBlockedUploadAttempt?: () => void;
 }
 
-export function FileUploader({ onFileUpload, disabled = false, keepLoadingOnSuccess = false }: FileUploaderProps) {
+export function FileUploader({
+  onFileUpload,
+  disabled = false,
+  keepLoadingOnSuccess = false,
+  onBlockedUploadAttempt,
+}: FileUploaderProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState('');
 
-  const handleFile = async (file: File) => {
+  const handleFile = useCallback(async (file: File) => {
     let uploadSucceeded = false;
 
     if (disabled || isUploading) {
@@ -31,16 +37,23 @@ export function FileUploader({ onFileUpload, disabled = false, keepLoadingOnSucc
     setError('');
     setIsUploading(true);
     try {
-      await onFileUpload(file);
-      uploadSucceeded = true;
+      const result = await onFileUpload(file);
+      uploadSucceeded = result !== false;
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'An error occurred during upload.');
     } finally {
       if (!uploadSucceeded || !keepLoadingOnSuccess) {
         setIsUploading(false);
       }
     }
-  };
+  }, [disabled, isUploading, keepLoadingOnSuccess, onFileUpload]);
 
   const onBrowse = () => {
+    if (onBlockedUploadAttempt) {
+      onBlockedUploadAttempt();
+      return;
+    }
+
     if (!disabled && !isUploading) {
       inputRef.current?.click();
     }
@@ -52,14 +65,18 @@ export function FileUploader({ onFileUpload, disabled = false, keepLoadingOnSucc
     if (file) {
       await handleFile(file);
     }
-  }, []);
+  }, [handleFile]);
 
   const handleDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
+    if (onBlockedUploadAttempt) {
+      return;
+    }
+
     if (!disabled && !isUploading) {
       setIsDragging(true);
     }
-  }, [disabled, isUploading]);
+  }, [disabled, isUploading, onBlockedUploadAttempt]);
 
   const handleDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -69,11 +86,17 @@ export function FileUploader({ onFileUpload, disabled = false, keepLoadingOnSucc
   const handleDrop = useCallback(async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setIsDragging(false);
+
+    if (onBlockedUploadAttempt) {
+      onBlockedUploadAttempt();
+      return;
+    }
+
     const file = event.dataTransfer.files?.[0];
     if (file) {
       await handleFile(file);
     }
-  }, []);
+  }, [handleFile, onBlockedUploadAttempt]);
 
   return (
     <div className="w-full max-w-[840px]">
