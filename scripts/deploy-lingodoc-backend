@@ -6,6 +6,8 @@ BACKEND_DIR="${BACKEND_DIR:-$APP_DIR/backend}"
 ENV_FILE="${ENV_FILE:-$BACKEND_DIR/.env}"
 DB_PATH="${DB_PATH:-$APP_DIR/data/lingodoc.sqlite3}"
 BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
+RELEASE_DIR="${RELEASE_DIR:-$APP_DIR/releases}"
+RELEASE_IMAGE_FILE="${RELEASE_IMAGE_FILE:-$RELEASE_DIR/backend-image.txt}"
 OLD_SERVICE="${OLD_SERVICE:-lingodoc-backend}"
 CONTAINER_NAME="${CONTAINER_NAME:-lingodoc-backend}"
 BRANCH="${BRANCH:-master}"
@@ -17,18 +19,22 @@ FONT_BOLD="${PDF_TRANSLATION_FONT_BOLD:-/usr/share/fonts/opentype/noto/NotoSansC
 usage() {
   cat <<USAGE
 Usage:
-  deploy-lingodoc-backend IMAGE_REF
+  deploy-lingodoc-backend [IMAGE_REF]
 
 Examples:
+  deploy-lingodoc-backend
   deploy-lingodoc-backend ghcr.io/your-org/lingodoc-backend:2026-06-17-1
   deploy-lingodoc-backend ghcr.io/your-org/lingodoc-backend@sha256:...
 
 Temporary fallback:
   BUILD_LOCAL=1 deploy-lingodoc-backend
 
-IMAGE_REF or LINGODOC_BACKEND_IMAGE should point to the exact backend image that
-passed local/staging PDF smoke tests. BUILD_LOCAL=1 exists only as a migration
-path and rebuilds on the production host.
+Without IMAGE_REF, the script reads the image from:
+  $RELEASE_IMAGE_FILE
+
+IMAGE_REF, LINGODOC_BACKEND_IMAGE, or $RELEASE_IMAGE_FILE should point to the
+exact backend image that passed CI/staging checks. BUILD_LOCAL=1 exists only as
+a migration path and rebuilds on the production host.
 USAGE
 }
 
@@ -40,10 +46,14 @@ fi
 IMAGE_REF="${1:-${LINGODOC_BACKEND_IMAGE:-}}"
 BUILD_LOCAL="${BUILD_LOCAL:-0}"
 
+if [[ -z "$IMAGE_REF" && "$BUILD_LOCAL" != "1" && -f "$RELEASE_IMAGE_FILE" ]]; then
+  IMAGE_REF="$(tr -d '[:space:]' < "$RELEASE_IMAGE_FILE")"
+fi
+
 if [[ -z "$IMAGE_REF" && "$BUILD_LOCAL" != "1" ]]; then
   usage >&2
   echo >&2
-  echo "Error: IMAGE_REF is required unless BUILD_LOCAL=1 is set." >&2
+  echo "Error: IMAGE_REF is required unless $RELEASE_IMAGE_FILE exists or BUILD_LOCAL=1 is set." >&2
   exit 2
 fi
 
