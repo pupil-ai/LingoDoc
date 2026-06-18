@@ -8,6 +8,7 @@ from typing import Iterable, Iterator, List, Dict, Any
 
 from app.services.pdf_export_utils import pixmap_to_export_image_bytes, write_optimized_pdf
 from app.services.pdf_font_utils import detect_page_required_scripts, resolve_translation_font_paths
+from app.services.pdf_font_utils import TranslationFontConfigurationError
 from app.services.pdf_layout_analyzer import PDFLayoutAnalyzer
 from app.services.pdf_layout_utils import (
     color_from_int,
@@ -1632,7 +1633,9 @@ class PDFService(PDFLayoutAnalyzer):
                 page.insert_font(fontfile=regular_font_path, fontname="custom_translation_regular")
                 regular_font_registered = True
             except Exception as e:
-                print(f"[DEBUG] Failed to register font: {str(e)}")
+                raise TranslationFontConfigurationError(
+                    f"Failed to register PDF translation font: {regular_font_path}. Error: {e}"
+                ) from e
 
         bold_font_registered = False
         if bold_font_path:
@@ -1640,7 +1643,9 @@ class PDFService(PDFLayoutAnalyzer):
                 page.insert_font(fontfile=bold_font_path, fontname="custom_translation_bold")
                 bold_font_registered = True
             except Exception as e:
-                print(f"[DEBUG] Failed to register bold font: {str(e)}")
+                raise TranslationFontConfigurationError(
+                    f"Failed to register bold PDF translation font: {bold_font_path}. Error: {e}"
+                ) from e
 
         regular_font_name = "custom_translation_regular" if regular_font_registered else "helv"
         bold_font_name = "custom_translation_bold" if bold_font_registered else regular_font_name

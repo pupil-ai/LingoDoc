@@ -17,15 +17,6 @@ function resolveApiBaseUrl(): string {
     return API_BASE_URL;
   }
 
-  if (typeof window === 'undefined') {
-    return '';
-  }
-
-  const { hostname, protocol } = window.location;
-  if (hostname === 'localhost' || hostname === '127.0.0.1') {
-    return `${protocol}//${hostname}:8000`;
-  }
-
   return '';
 }
 

@@ -8,6 +8,10 @@ env_path = pathlib.Path(__file__).parent / ".env"
 load_dotenv(dotenv_path=env_path)
 print(f"[DEBUG] Loaded env from: {env_path}")
 
+from app.services.pdf_font_utils import validate_translation_fonts
+
+validate_translation_fonts()
+
 from app.api.routes import router
 
 app = FastAPI(title="LingoDoc API", version="1.0.0")

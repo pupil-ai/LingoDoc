@@ -1,0 +1,26 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      args:
+        HTTP_PROXY: http://host.docker.internal:1780
+        HTTPS_PROXY: http://host.docker.internal:1780
+        NO_PROXY: localhost,127.0.0.1,host.docker.internal
+        http_proxy: http://host.docker.internal:1780
+        https_proxy: http://host.docker.internal:1780
+        no_proxy: localhost,127.0.0.1,host.docker.internal
+    ports:
+      - "18000:8000"
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_PATH: /app/data/lingodoc.db
+      LOCAL_STORAGE_ROOT: /app/storage
+      LOCAL_STORAGE_CACHE_DIR: /app/tmp/storage-cache
+      PDF_TRANSLATION_FONT_REGULAR: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
+      PDF_TRANSLATION_FONT_BOLD: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+    volumes:
+      - ./backend/data:/app/data
+      - ./backend/uploads:/app/storage/uploads
+      - ./backend/outputs:/app/storage/outputs
+      - ./backend/tmp:/app/tmp

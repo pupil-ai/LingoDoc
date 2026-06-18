@@ -1,5 +1,6 @@
 import os
-from typing import Any, Iterable
+from pathlib import Path
+from typing import Any
 
 
 SCRIPT_LATIN = "latin"
@@ -9,11 +10,13 @@ SCRIPT_CJK = "cjk"
 SCRIPT_OTHER = "other"
 
 
-def find_existing_font(font_paths: Iterable[str]) -> str:
-    for font_path in font_paths:
-        if font_path and os.path.exists(font_path):
-            return font_path
-    return ""
+TRANSLATION_FONT_REGULAR_ENV = "PDF_TRANSLATION_FONT_REGULAR"
+TRANSLATION_FONT_BOLD_ENV = "PDF_TRANSLATION_FONT_BOLD"
+BACKEND_ROOT = Path(__file__).resolve().parents[2]
+
+
+class TranslationFontConfigurationError(RuntimeError):
+    pass
 
 
 def detect_required_scripts(text: str) -> set[str]:
@@ -47,44 +50,60 @@ def detect_page_required_scripts(page_data: dict[str, Any]) -> set[str]:
     return scripts
 
 
+def _resolve_configured_font_path(env_name: str) -> str:
+    raw_path = os.getenv(env_name, "").strip()
+    if not raw_path:
+        raise TranslationFontConfigurationError(
+            f"{env_name} is required. Use the same Docker image locally and in production, "
+            "and point this variable at the bundled translation font."
+        )
+
+    font_path = Path(raw_path).expanduser()
+    if not font_path.is_absolute():
+        font_path = BACKEND_ROOT / font_path
+    font_path = font_path.resolve()
+
+    if not font_path.exists():
+        raise TranslationFontConfigurationError(f"{env_name} does not exist: {font_path}")
+    if not font_path.is_file():
+        raise TranslationFontConfigurationError(f"{env_name} is not a file: {font_path}")
+    return str(font_path)
+
+
+def get_translation_font_paths() -> tuple[str, str]:
+    regular_font_path = _resolve_configured_font_path(TRANSLATION_FONT_REGULAR_ENV)
+    bold_font_path = _resolve_configured_font_path(TRANSLATION_FONT_BOLD_ENV)
+    return regular_font_path, bold_font_path
+
+
+def validate_translation_fonts() -> tuple[str, str]:
+    regular_font_path, bold_font_path = get_translation_font_paths()
+
+    try:
+        import fitz
+
+        doc = fitz.open()
+        try:
+            page = doc.new_page()
+            page.insert_font(fontfile=regular_font_path, fontname="translation_regular_validation")
+            page.insert_font(fontfile=bold_font_path, fontname="translation_bold_validation")
+        finally:
+            doc.close()
+    except Exception as exc:
+        raise TranslationFontConfigurationError(
+            "Configured PDF translation fonts could not be registered by PyMuPDF: "
+            f"{regular_font_path}, {bold_font_path}. Error: {exc}"
+        ) from exc
+
+    print(
+        "[STARTUP] PDF translation fonts ready: "
+        f"regular={regular_font_path} bold={bold_font_path}"
+    )
+    return regular_font_path, bold_font_path
+
+
 def resolve_translation_font_paths(required_scripts: set[str]) -> tuple[str, str]:
     if not required_scripts or required_scripts <= {SCRIPT_LATIN}:
         return "", ""
 
-    if SCRIPT_CJK in required_scripts or SCRIPT_OTHER in required_scripts:
-        cjk_font_paths = [
-            "C:\\Windows\\Fonts\\msyh.ttc",
-            "C:\\Windows\\Fonts\\simhei.ttf",
-            "C:\\Windows\\Fonts\\Dengl.ttf",
-            "C:\\Windows\\Fonts\\Deng.ttf",
-            "C:\\Windows\\Fonts\\NotoSansSC-VF.ttf",
-            "C:\\Windows\\Fonts\\simsun.ttc",
-            "C:\\Windows\\Fonts\\msgothic.ttc",
-            "C:\\Windows\\Fonts\\YuGothR.ttc",
-        ]
-        regular_font_path = find_existing_font(cjk_font_paths)
-        bold_candidates = [
-            "C:\\Windows\\Fonts\\msyhbd.ttc",
-            "C:\\Windows\\Fonts\\simhei.ttf",
-            "C:\\Windows\\Fonts\\Dengb.ttf",
-            regular_font_path,
-            "C:\\Windows\\Fonts\\simsunb.ttf",
-        ]
-        bold_font_path = find_existing_font(bold_candidates) or regular_font_path
-        return regular_font_path, bold_font_path
-
-    regular_font_path = find_existing_font([
-        "C:\\Windows\\Fonts\\arial.ttf",
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        "C:\\Windows\\Fonts\\tahoma.ttf",
-        "C:\\Windows\\Fonts\\calibri.ttf",
-        "C:\\Windows\\Fonts\\times.ttf",
-    ])
-    bold_font_path = find_existing_font([
-        "C:\\Windows\\Fonts\\arialbd.ttf",
-        "C:\\Windows\\Fonts\\segoeuib.ttf",
-        "C:\\Windows\\Fonts\\tahomabd.ttf",
-        "C:\\Windows\\Fonts\\calibrib.ttf",
-        regular_font_path,
-    ])
-    return regular_font_path, bold_font_path
+    return get_translation_font_paths()

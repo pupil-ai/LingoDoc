@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="${APP_DIR:-/var/www/lingodoc}"
+BACKEND_DIR="${BACKEND_DIR:-$APP_DIR/backend}"
+ENV_FILE="${ENV_FILE:-$BACKEND_DIR/.env}"
+DB_PATH="${DB_PATH:-$APP_DIR/data/lingodoc.sqlite3}"
+BACKUP_DIR="${BACKUP_DIR:-$APP_DIR/backups}"
+OLD_SERVICE="${OLD_SERVICE:-lingodoc-backend}"
+CONTAINER_NAME="${CONTAINER_NAME:-lingodoc-backend}"
+BRANCH="${BRANCH:-master}"
+API_URL="${API_URL:-https://api.lingodoc.xyz/}"
+PORT_BINDING="${PORT_BINDING:-127.0.0.1:8000:8000}"
+FONT_REGULAR="${PDF_TRANSLATION_FONT_REGULAR:-/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc}"
+FONT_BOLD="${PDF_TRANSLATION_FONT_BOLD:-/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc}"
+
+usage() {
+  cat <<USAGE
+Usage:
+  deploy-lingodoc-backend IMAGE_REF
+
+Examples:
+  deploy-lingodoc-backend ghcr.io/your-org/lingodoc-backend:2026-06-17-1
+  deploy-lingodoc-backend ghcr.io/your-org/lingodoc-backend@sha256:...
+
+Temporary fallback:
+  BUILD_LOCAL=1 deploy-lingodoc-backend
+
+IMAGE_REF or LINGODOC_BACKEND_IMAGE should point to the exact backend image that
+passed local/staging PDF smoke tests. BUILD_LOCAL=1 exists only as a migration
+path and rebuilds on the production host.
+USAGE
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+IMAGE_REF="${1:-${LINGODOC_BACKEND_IMAGE:-}}"
+BUILD_LOCAL="${BUILD_LOCAL:-0}"
+
+if [[ -z "$IMAGE_REF" && "$BUILD_LOCAL" != "1" ]]; then
+  usage >&2
+  echo >&2
+  echo "Error: IMAGE_REF is required unless BUILD_LOCAL=1 is set." >&2
+  exit 2
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "Error: docker is required on this host before deploying the backend container." >&2
+  exit 1
+fi
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "Error: backend env file not found: $ENV_FILE" >&2
+  exit 1
+fi
+
+mkdir -p "$BACKUP_DIR"
+
+if [[ -f "$DB_PATH" ]]; then
+  ts="$(date +%Y%m%d-%H%M%S)"
+  cp "$DB_PATH" "$BACKUP_DIR/lingodoc-$ts.sqlite3"
+  echo "Backed up database: $BACKUP_DIR/lingodoc-$ts.sqlite3"
+else
+  echo "Database not found, skipping backup: $DB_PATH"
+fi
+
+if [[ "$BUILD_LOCAL" == "1" ]]; then
+  IMAGE_REF="${IMAGE_REF:-lingodoc-backend:local-$(date +%Y%m%d-%H%M%S)}"
+  echo "BUILD_LOCAL=1: building backend image on this host from $BACKEND_DIR"
+  echo "This is a migration path. For production parity, deploy a prebuilt immutable image."
+  cd "$APP_DIR"
+  git fetch origin "$BRANCH"
+  git checkout "$BRANCH"
+  git pull --ff-only origin "$BRANCH"
+  docker build -t "$IMAGE_REF" "$BACKEND_DIR"
+else
+  echo "Pulling backend image: $IMAGE_REF"
+  docker pull "$IMAGE_REF"
+fi
+
+old_container_image="$(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+old_service_active="inactive"
+old_service_enabled="disabled"
+if systemctl list-unit-files "$OLD_SERVICE.service" >/dev/null 2>&1; then
+  old_service_active="$(systemctl is-active "$OLD_SERVICE" 2>/dev/null || true)"
+  old_service_enabled="$(systemctl is-enabled "$OLD_SERVICE" 2>/dev/null || true)"
+fi
+
+run_container() {
+  local image="$1"
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    --restart unless-stopped \
+    --env-file "$ENV_FILE" \
+    -e "PDF_TRANSLATION_FONT_REGULAR=$FONT_REGULAR" \
+    -e "PDF_TRANSLATION_FONT_BOLD=$FONT_BOLD" \
+    -p "$PORT_BINDING" \
+    -v "$APP_DIR/data:$APP_DIR/data" \
+    -v "$APP_DIR/cache:$APP_DIR/cache" \
+    -v "$BACKEND_DIR/uploads:$BACKEND_DIR/uploads" \
+    -v "$BACKEND_DIR/outputs:$BACKEND_DIR/outputs" \
+    -v "$BACKEND_DIR/tmp:$BACKEND_DIR/tmp" \
+    "$image"
+}
+
+rollback() {
+  echo "Deployment failed. Rolling back." >&2
+  docker logs --tail 120 "$CONTAINER_NAME" >&2 || true
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+  if [[ -n "$old_container_image" ]]; then
+    echo "Restarting previous backend container image: $old_container_image" >&2
+    run_container "$old_container_image" >/dev/null
+    return
+  fi
+
+  if systemctl list-unit-files "$OLD_SERVICE.service" >/dev/null 2>&1; then
+    if [[ "$old_service_enabled" == "enabled" ]]; then
+      systemctl enable "$OLD_SERVICE" >/dev/null || true
+    fi
+    if [[ "$old_service_active" == "active" ]]; then
+      systemctl restart "$OLD_SERVICE" || true
+    fi
+  fi
+}
+
+if systemctl list-unit-files "$OLD_SERVICE.service" >/dev/null 2>&1; then
+  systemctl stop "$OLD_SERVICE" || true
+fi
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+container_id="$(run_container "$IMAGE_REF")"
+echo "Started backend container: $container_id"
+
+if ! docker exec "$CONTAINER_NAME" python -c "from app.services.pdf_font_utils import validate_translation_fonts; validate_translation_fonts()" >/dev/null; then
+  rollback
+  exit 1
+fi
+
+sleep 3
+if ! docker ps --filter "name=^/${CONTAINER_NAME}$" --filter "status=running" --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+  rollback
+  exit 1
+fi
+
+if ! curl -fsS "$API_URL" >/dev/null; then
+  rollback
+  exit 1
+fi
+
+if systemctl list-unit-files "$OLD_SERVICE.service" >/dev/null 2>&1; then
+  systemctl disable "$OLD_SERVICE" >/dev/null || true
+fi
+
+echo "Backend container updated and healthy: $API_URL"
+echo "Image: $IMAGE_REF"

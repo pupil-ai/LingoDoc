@@ -19,6 +19,8 @@ The current implementation is no longer just an early PDF rendering experiment. 
 - `backend/app/services/pdf_layout_analyzer.py` extracts and classifies PDF text/layout blocks.
 - `backend/app/services/pdf_service.py` renders original previews, translated page previews, translated PDFs, bilingual PDFs, page-level JSON results, cached exports, and export quality reports.
 - `backend/app/services/pdf_quality_service.py` scans translated output metadata for suspicious translation/export issues.
+- `backend/Dockerfile` defines the backend runtime image used for local production-like development and production image deployment.
+- `docker-compose.yml` runs the local backend container. It maps host `localhost:18000` to container port `8000` because Windows may reserve host port `8000`.
 
 ## Implemented Product Behavior
 
@@ -71,6 +73,8 @@ Do not rely on frontend-only checks for billing or quota enforcement.
 - Page-level preview must remain independent from full PDF export. Do not make first preview depend on generating a complete PDF.
 - Keep export caching and page-result caching intact when refactoring rendering.
 - Be careful with selection behavior: visually hidden text in PDFs can still be selectable.
+- Translated PDF rendering must use explicitly configured CJK-capable fonts through `PDF_TRANSLATION_FONT_REGULAR` and `PDF_TRANSLATION_FONT_BOLD`.
+- Do not add silent font fallbacks to host Windows/macOS/Linux system fonts for translated output. Missing or unregistrable translation fonts should fail fast so local Docker, staging, and production surface the problem before bad PDFs are generated.
 
 ## Translation Rules
 
@@ -97,6 +101,7 @@ Backend:
 - `TRANSLATION_FALLBACK_CONCURRENCY`, `PAGE_TRANSLATION_CONCURRENCY`, `PAGE_RETRY_LIMIT`
 - `AUTO_PREPARE_EXPORTS`, `AUTO_PREPARE_EXPORT_TYPES`
 - `PDF_PERF_LOGS`
+- `PDF_TRANSLATION_FONT_REGULAR`, `PDF_TRANSLATION_FONT_BOLD`
 - plan limit env vars listed above
 
 Frontend:
@@ -116,10 +121,12 @@ Do not commit real secrets or production `.env` files.
 Backend:
 
 ```powershell
-cd backend
-python -m pip install -r requirements.txt
-python main.py
+docker compose up --build backend
 ```
+
+The local Docker backend is exposed at `http://localhost:18000`; the container still listens on port `8000`.
+
+Use the Docker backend for normal local development and production-parity checks. `python main.py` is only for narrow debugging when explicitly needed, and it must still use the same explicit translation font environment variables. Do not treat host Python as a production-equivalent validation path.
 
 Frontend:
 
@@ -133,6 +140,7 @@ Validation:
 
 ```powershell
 python -m py_compile backend/app/services/pdf_service.py backend/app/api/routes.py backend/app/services/translate_service.py
+docker compose build backend
 cd frontend
 npx.cmd tsc --noEmit
 npm run build
@@ -141,8 +149,11 @@ npm run build
 ## Deployment Notes
 
 - `backend/main.py` currently allows `allow_origins=["*"]`; lock this down for production domains before public launch.
-- `frontend/next.config.js` rewrites `/api/*` to `http://localhost:8000/api/*` for local development. Production should set `NEXT_PUBLIC_API_BASE_URL` or use platform routing intentionally.
+- `frontend/next.config.js` rewrites `/api/*` to `http://localhost:18000/api/*` by default for local Docker development. Production should set `NEXT_PUBLIC_API_BASE_URL` or use platform routing intentionally.
 - Use `PREVIEW_URL_SECRET` in production instead of relying on fallback secrets.
+- Production backend deployment should run an immutable backend Docker image built from `backend/Dockerfile`; do not deploy production by running `git pull`, `pip install`, and bare `python main.py` on the server.
+- `scripts/deploy-lingodoc-backend` is the deployment script template. It expects an image reference, starts the backend container, verifies PDF translation fonts inside the container, health-checks the API, and rolls back on failure.
+- Keep development and production as separate environments with separate `.env`, storage, database, and secrets. They should share the same Dockerfile/runtime shape and font strategy, not the same live instance or data.
 - R2 is supported, but local storage is easier for development.
 - SQLite is currently the database. If running multiple backend instances, consider that in-memory `translation_tasks` and `export_tasks` are process-local while persisted task/file/user state is in SQLite/storage.
 - Background work uses FastAPI background tasks and in-process asyncio. Large production deployments may need a real queue/worker model before horizontal scaling.
@@ -152,6 +163,7 @@ npm run build
 ## Validation Before PDF-Related Changes
 
 - Run `python -m py_compile backend/app/services/pdf_service.py backend/app/api/routes.py backend/app/services/translate_service.py`.
+- Build and start the backend Docker container with `docker compose up --build backend` when validating PDF rendering or deployment-parity behavior.
 - If frontend code changes, run `npx.cmd tsc --noEmit` from `frontend`.
 - For UI-affecting frontend changes, also run `npm run build` from `frontend` when feasible.
 - Upload a real PDF, translate it, preview translated pages, start export jobs for `bilingual` and `translated`, and download both PDFs.

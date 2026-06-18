@@ -85,13 +85,22 @@ Keep both in sync when changing product packaging.
 
 ## Backend Setup
 
+Run the backend in Docker for local development. This matches the production Linux
+runtime and uses the same bundled CJK PDF fonts as production.
+
 ```powershell
-cd backend
-python -m pip install -r requirements.txt
-python main.py
+docker compose up --build backend
 ```
 
-The backend reads environment variables from `backend/.env`.
+The backend reads environment variables from `backend/.env`. The container stores
+local SQLite data and generated files under `backend/data`, `backend/uploads`,
+`backend/outputs`, and `backend/tmp`.
+The local Docker backend is exposed on `http://localhost:18000` because Windows
+often reserves port `8000`; the container still listens on port `8000`.
+
+Direct `python main.py` is useful only for quick syntax/debug checks. It is not a
+production-parity validation path because it uses the host OS rather than the
+deployment image.
 
 Important backend variables:
 
@@ -102,6 +111,8 @@ Important backend variables:
 - `DATABASE_PATH`
 - `STORAGE_PROVIDER`
 - `LOCAL_STORAGE_ROOT`
+- `PDF_TRANSLATION_FONT_REGULAR`
+- `PDF_TRANSLATION_FONT_BOLD`
 - `R2_BUCKET`
 - `R2_ENDPOINT_URL`
 - `R2_ACCESS_KEY_ID`
@@ -129,7 +140,7 @@ Important frontend variables:
 - `NEXT_PUBLIC_PADDLE_ENVIRONMENT`
 - Paddle price IDs for Starter, Pro, and Power monthly/yearly plans
 
-For local development, `frontend/next.config.js` rewrites `/api/*` to `http://localhost:8000/api/*`. Production should set routing intentionally, usually via `NEXT_PUBLIC_API_BASE_URL` or deployment-platform rewrites.
+For local development, `frontend/next.config.js` rewrites `/api/*` to `http://localhost:18000/api/*` by default. Production should set routing intentionally, usually via `NEXT_PUBLIC_API_BASE_URL` or deployment-platform rewrites.
 
 ## Validation
 
@@ -162,6 +173,10 @@ Manual smoke test before deployment:
 
 - `backend/main.py` currently allows all CORS origins. Restrict this before public launch.
 - Use a dedicated `PREVIEW_URL_SECRET` in production.
+- Deploy the same immutable backend Docker image that passed local/staging PDF
+  smoke tests. Do not rebuild a different image on the production host.
+- The backend fails startup if `PDF_TRANSLATION_FONT_REGULAR` or
+  `PDF_TRANSLATION_FONT_BOLD` is missing or PyMuPDF cannot register the fonts.
 - Cloudflare R2 is supported for object storage. Local storage is simpler for development.
 - SQLite plus in-process background tasks are suitable for simple deployments, but multiple backend instances need extra care because runtime task maps are process-local.
 - Large-scale deployment should move translation/export work to a durable queue and worker.
