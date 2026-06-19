@@ -74,6 +74,7 @@ function Footer() {
           <span>(c) 2026 LingoDoc</span>
           <Link href="/privacy">Privacy</Link>
           <Link href="/terms">Terms</Link>
+          <Link href="/refund">Refunds</Link>
           <Link href="/help">Help</Link>
         </div>
         <div className="flex flex-wrap items-center gap-3">
