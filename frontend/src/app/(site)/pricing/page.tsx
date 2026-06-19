@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { SignInButton, useAuth, useUser } from '@clerk/nextjs';
 import { Check, Mail, Sparkles, X } from 'lucide-react';
+import Link from 'next/link';
 
 declare global {
   interface Window {
@@ -172,12 +173,20 @@ function formatPerPagePrice(value: number): string {
 
 const faqs = [
   {
-    title: 'Can I change my plan later?',
-    body: 'Plan changes are handled through Paddle. Availability may depend on your subscription status.',
+    title: 'How accurate is the translation and layout?',
+    body: 'LingoDoc works best with text-based PDFs where the text can be selected or copied. It helps you save time and reduce translation costs while producing clear, accurate translations for everyday business, academic, and personal documents. Original layouts are preserved as closely as possible, though complex formatting or certified translation needs may still require human review.',
   },
   {
-    title: 'What payment methods do you accept?',
-    body: 'Payment methods are shown at checkout.',
+    title: 'What is your refund policy?',
+    body: (
+      <>
+        First-time subscribers may request a refund within 14 days if the paid service has not been substantially used. Completed translations, exported PDFs, and consumed page allowances are generally non-refundable. Please read our{' '}
+        <Link href="/refund" className="font-semibold text-emerald-600 transition-colors hover:text-emerald-700">
+          Refund Policy
+        </Link>{' '}
+        for full details.
+      </>
+    ),
   },
   {
     title: 'Is there a free trial?',
