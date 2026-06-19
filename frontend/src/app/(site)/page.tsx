@@ -217,7 +217,7 @@ function HomeContent() {
               keepLoadingOnSuccess
               onBlockedUploadAttempt={!isLoaded || !isSignedIn ? handleBlockedUploadAttempt : undefined}
             />
-            <p className="mt-4 text-center text-[12px] font-medium text-slate-400">Supports large PDF files</p>
+            <p className="mt-4 text-center text-[12px] font-medium text-slate-400">Scanned PDFs are not supported yet</p>
             {visibleUploadNotice && (
               <p
                 key={noticeShakeKey}
