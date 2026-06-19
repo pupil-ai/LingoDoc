@@ -21,12 +21,28 @@ import {
 import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
 
 type DownloadType = 'bilingual' | 'translated';
+type TranslateViewState = 'ready' | 'translating' | 'loading-preview';
 type ToastState =
   | {
       type: 'loading' | 'success' | 'error';
       message: string;
     }
   | null;
+
+const TRANSLATE_VIEW_COPY: Record<TranslateViewState, { title: string; description: string }> = {
+  ready: {
+    title: 'Ready to translate',
+    description: 'Choose a language, then start your translation.',
+  },
+  translating: {
+    title: 'Translating your document',
+    description: 'Keeping the layout as close as possible.',
+  },
+  'loading-preview': {
+    title: 'Preparing your preview',
+    description: 'Just a moment.',
+  },
+};
 
 function ClerkSetupRequired() {
   return (
@@ -406,11 +422,11 @@ function TranslatedPagePreview({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-100">
       <div ref={previewViewportRef} className="relative min-h-0 flex-1 overflow-auto overscroll-contain">
-        {loading ? (
+        {loading && imageUrl ? (
           <div className="absolute inset-0 z-10">
             <PreviewPlaceholder
-              title="Preparing page preview"
-              description="Preparing page preview..."
+              title={TRANSLATE_VIEW_COPY['loading-preview'].title}
+              description={TRANSLATE_VIEW_COPY['loading-preview'].description}
               originalPreviewUrl={imageUrl || originalPreviewUrl}
               processing
               overlay
@@ -459,8 +475,8 @@ function TranslatedPagePreview({
           </div>
         ) : (
           <PreviewPlaceholder
-            title="Preparing page preview"
-            description="Preparing page preview..."
+            title={TRANSLATE_VIEW_COPY['loading-preview'].title}
+            description={TRANSLATE_VIEW_COPY['loading-preview'].description}
             originalPreviewUrl={imageUrl || originalPreviewUrl}
             processing
             overlay
@@ -543,19 +559,23 @@ function TranslatePageContent() {
   );
   const isStartBlocked = exceedsPaidFileLimit || exceedsPaidMonthlyQuota || hasNoFreePreviewPages;
   const isProcessing = Boolean(taskId) && !result;
-  const isRestoringCompletedResult = Boolean(initialTaskId && isCompletedHistoryEntry) && !result && (isRestoringCompletedTask || isPreparingPreview);
-  const isStartingTranslation = isStarting || isProcessing || isPreparingPreview;
+  const isTranslationRunning = isStarting || isProcessing || Boolean(initialTaskId && isProcessingHistoryEntry && !result);
+  const isPreviewLoadingState =
+    isPreparingPreview ||
+    isPreviewLoading ||
+    isRestoringCompletedTask ||
+    Boolean(result && !previewPageImageUrl && !previewError);
+  const translateViewState: TranslateViewState = isPreviewLoadingState
+    ? 'loading-preview'
+    : isTranslationRunning
+      ? 'translating'
+      : 'ready';
+  const placeholderCopy = TRANSLATE_VIEW_COPY[translateViewState];
   const originalPreviewUrl = useMemo(() => originalPreviewObjectUrl, [originalPreviewObjectUrl]);
   const previewPageCount = Math.max(result?.translatedPages || result?.pages?.length || progress.translatedPages || progress.requestedPages || knownTotalPages || 1, 1);
   const isPreviewReady = Boolean(result && previewPageImageUrl && !isPreparingPreview && !previewError);
   const translatedPageCount = result?.translatedPages || progress.translatedPages || progress.requestedPages || 0;
   const isPartialTranslation = Boolean(result?.isPartial || progress.isPartial || (translatedPageCount > 0 && knownTotalPages > translatedPageCount));
-  const completedTitle = isPartialTranslation
-    ? `Preview translation completed (${formatPageCount(translatedPageCount)})`
-    : 'Translation completed';
-  const completedStatusLabel = isPartialTranslation
-    ? `Preview translation completed: ${formatPageCount(translatedPageCount)}`
-    : 'Translation completed';
 
   const statusSummary = useMemo(() => {
     if (!usage) {
@@ -765,6 +785,14 @@ function TranslatePageContent() {
       if (progressData.status === 'completed') {
         pollErrorCountRef.current = 0;
         setError('');
+        setProgress((current) => ({
+          ...current,
+          status: 'completed',
+          progress: 100,
+          processedPages: progressData.processedPages ?? progressData.translatedPages ?? current.processedPages,
+          translatedPages: progressData.translatedPages ?? progressData.processedPages ?? current.translatedPages,
+        }));
+        await wait(300);
         setIsPreparingPreview(true);
         const resultData = await getTranslationResult(taskId, false, token);
         setResult(resultData);
@@ -1071,36 +1099,24 @@ function TranslatePageContent() {
 
       {!result ? (
         <PreviewPlaceholder
-          title={
-            isRestoringCompletedResult
-              ? completedTitle
-              : isStartingTranslation
-                ? 'Translating your document'
-                : 'Ready to translate'
-          }
-          description={
-            isRestoringCompletedResult
-              ? 'Preparing page preview...'
-              : isStartingTranslation
-              ? 'Please wait while we translate your PDF...'
-              : 'Select your target language and click the "Translate" button above to start translating your document.'
-          }
+          title={placeholderCopy.title}
+          description={placeholderCopy.description}
           originalPreviewUrl={originalPreviewUrl}
-          processing={isStartingTranslation || isRestoringCompletedResult}
+          processing={translateViewState !== 'ready'}
           error={error}
           footer={
             <div className="space-y-4">
-              {!isStartingTranslation && !isRestoringCompletedResult ? (
+              {translateViewState === 'ready' ? (
                 <p className="text-[15px] font-medium text-slate-500">
                   {labelForLang(sourceLang)} <ArrowLeftRight className="mx-1 inline size-4" strokeWidth={2} /> {labelForLang(targetLang)}
                 </p>
               ) : null}
 
-              {isStartingTranslation && !isRestoringCompletedResult ? (
+              {translateViewState === 'translating' ? (
                 <div className="mx-auto w-full max-w-[420px]">
                   <ProgressBar progress={progress} />
                 </div>
-              ) : !isRestoringCompletedResult ? (
+              ) : translateViewState === 'ready' ? (
                 <div className="rounded-xl border border-slate-200 bg-white px-6 py-3 text-[14px] font-medium text-slate-500">
                   {statusSummaryParts.map((part, index) => (
                     <span
@@ -1120,19 +1136,19 @@ function TranslatePageContent() {
                 </div>
               ) : null}
 
-              {isFreePlan && !isStartingTranslation && !isRestoringCompletedResult && usage ? (
+              {isFreePlan && translateViewState === 'ready' && usage ? (
                 <p className="mx-auto max-w-[420px] text-[13px] leading-6 text-slate-400">
                   Free plan translates the first {usage.freePreviewPages} page{usage.freePreviewPages === 1 ? '' : 's'} of each PDF as a preview.
                 </p>
               ) : null}
 
-              {isFreePlan && !isStartingTranslation && !isRestoringCompletedResult && usage ? (
+              {isFreePlan && translateViewState === 'ready' && usage ? (
                 <a href="/pricing" className="inline-flex text-[13px] font-semibold text-emerald-600">
                   View plans and limits
                 </a>
               ) : null}
 
-              {isStartBlocked && usage && !isStartingTranslation && !isRestoringCompletedResult ? (
+              {isStartBlocked && usage && translateViewState === 'ready' ? (
                 <div className="inline-flex items-center gap-2 text-[13px] font-semibold">
                   <span className="text-orange-600">Not enough remaining pages</span>
                   <a href="/pricing" className="text-emerald-600">
@@ -1145,10 +1161,10 @@ function TranslatePageContent() {
         />
       ) : !previewUrl ? (
         <PreviewPlaceholder
-          title="Translation completed"
-          description="Preparing page preview..."
+          title={TRANSLATE_VIEW_COPY['loading-preview'].title}
+          description={TRANSLATE_VIEW_COPY['loading-preview'].description}
           originalPreviewUrl={originalPreviewUrl}
-          processing
+          processing={!previewError}
           error={previewError}
         />
       ) : (
@@ -1175,9 +1191,9 @@ function TranslatePageContent() {
           <div className="flex flex-wrap items-center gap-3">
             {result ? (
               <>
-                <span className="font-medium text-emerald-600">{completedStatusLabel}</span>
-                {isPartialTranslation ? <span>| Export includes translated preview pages only</span> : null}
-                {usage ? <span>| {formatPlanName(usage.plan)}: {usage.remainingPages ?? 'Unlimited'} pages remaining this month</span> : null}
+                {isPartialTranslation ? <span>Export includes translated preview pages only</span> : null}
+                {isPartialTranslation && usage ? <span>|</span> : null}
+                {usage ? <span>{formatPlanName(usage.plan)}: {usage.remainingPages ?? 'Unlimited'} pages remaining this month</span> : null}
               </>
             ) : (
               <>
