@@ -81,7 +81,7 @@ const plans = [
     monthlyPages: 20,
     monthlyPriceId: '',
     yearlyPriceId: '',
-    button: 'Get started free',
+    button: 'Get started',
     items: ['Core translation model', '20 preview pages / month', 'Preview first 3 pages per PDF', 'PDF up to 25 MB'],
     highlighted: false,
     badge: '',
@@ -368,7 +368,6 @@ function PlanCard({
 
 function PricingPageContent() {
   const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
-  const [checkoutStatus, setCheckoutStatus] = useState('');
   const [checkoutPlan, setCheckoutPlan] = useState('');
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [previewPrices, setPreviewPrices] = useState<PricingPreviewMap>({});
@@ -481,24 +480,22 @@ function PricingPageContent() {
     }
 
     if (!isLoaded || !isSignedIn || !user) {
-      setCheckoutStatus('Please sign in before choosing a paid plan.');
       return;
     }
 
     if (!PADDLE_CLIENT_TOKEN) {
-      setCheckoutStatus('Paddle is not configured yet. Add NEXT_PUBLIC_PADDLE_CLIENT_TOKEN.');
+      console.error('Paddle is not configured yet. Add NEXT_PUBLIC_PADDLE_CLIENT_TOKEN.');
       return;
     }
 
     const priceId = isYearly ? plan.yearlyPriceId : plan.monthlyPriceId;
     if (!priceId) {
-      setCheckoutStatus(`Paddle price ID is missing for ${plan.name} ${billingCycle}.`);
+      console.error(`Paddle price ID is missing for ${plan.name} ${billingCycle}.`);
       return;
     }
 
     try {
       setCheckoutPlan(plan.key);
-      setCheckoutStatus('Opening Paddle checkout...');
       const paddle = await initializePaddle();
 
       const email = user.primaryEmailAddress?.emailAddress;
@@ -511,9 +508,8 @@ function PricingPageContent() {
           billingCycle,
         },
       });
-      setCheckoutStatus('Complete payment in the Paddle window. Your plan updates after the webhook is received.');
     } catch (error) {
-      setCheckoutStatus(error instanceof Error ? error.message : 'Failed to open Paddle checkout.');
+      console.error(error instanceof Error ? error.message : 'Failed to open Paddle checkout.');
     } finally {
       setCheckoutPlan('');
     }
@@ -553,12 +549,6 @@ function PricingPageContent() {
               Yearly <span className="text-emerald-600">-20%</span>
             </button>
           </div>
-
-          {checkoutStatus && (
-            <p className="mx-auto mt-6 max-w-[720px] rounded-xl border border-slate-200 bg-white px-4 py-3 text-[13px] font-medium text-slate-600">
-              {checkoutStatus}
-            </p>
-          )}
         </section>
 
         <section className="mt-12 grid gap-4 xl:grid-cols-4">
