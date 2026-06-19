@@ -48,7 +48,7 @@ declare global {
 
 const PADDLE_CLIENT_TOKEN = process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN || '';
 const PADDLE_ENVIRONMENT = process.env.NEXT_PUBLIC_PADDLE_ENVIRONMENT || 'sandbox';
-const CHECKOUT_USAGE_POLL_TIMEOUT_MS = 15_000;
+const CHECKOUT_USAGE_POLL_TIMEOUT_MS = 5_000;
 const CHECKOUT_USAGE_POLL_INTERVAL_MS = 1_000;
 
 function loadPaddleScript(): Promise<void> {
@@ -272,6 +272,7 @@ function PlanCard({
   isYearly,
   isLoaded,
   isSignedIn,
+  isSkeleton,
   isHighlighted,
   isCurrentPlan,
   badge,
@@ -285,6 +286,7 @@ function PlanCard({
   isYearly: boolean;
   isLoaded: boolean;
   isSignedIn: boolean;
+  isSkeleton: boolean;
   isHighlighted: boolean;
   isCurrentPlan: boolean;
   badge: string;
@@ -302,7 +304,38 @@ function PlanCard({
     ? (previewPrice?.yearlyMonthlyAmount ?? Math.round(plan.yearlyPrice / 12))
     : (previewPrice?.monthlyAmount ?? plan.monthlyPrice);
   const perPageLabel = formatPerPagePrice(monthlyAmount / plan.monthlyPages);
-  const showPriceSkeleton = isPriceLoading;
+  const showSkeleton = isSkeleton || isPriceLoading;
+
+  if (showSkeleton) {
+    return (
+      <div className="relative flex h-full flex-col rounded-2xl border border-slate-200 bg-white p-6">
+        <div className="absolute left-1/2 top-0 h-[22px] w-[96px] -translate-x-1/2 -translate-y-1/2 animate-pulse rounded-full bg-slate-100" />
+        <div className="h-5 w-[76px] animate-pulse rounded-md bg-slate-100" />
+        <div className="mt-2 h-4 w-[112px] animate-pulse rounded-md bg-slate-100" />
+
+        <div className="mt-5 min-h-[86px] space-y-3">
+          <div className="h-12 w-[128px] animate-pulse rounded-md bg-slate-100" />
+          <div className="h-4 w-[96px] animate-pulse rounded-md bg-slate-100" />
+          <div className="h-4 w-[82px] animate-pulse rounded-md bg-slate-100" />
+        </div>
+
+        <div className="mt-6 flex-1 space-y-3">
+          {plan.items.map((item, index) => (
+            <div key={`${plan.key}-skeleton-${item}`} className="flex items-start gap-3">
+              <div className="mt-1 h-4 w-4 shrink-0 animate-pulse rounded-full bg-slate-100" />
+              <div
+                className={`h-4 animate-pulse rounded-md bg-slate-100 ${
+                  index % 3 === 0 ? 'w-[82%]' : index % 3 === 1 ? 'w-[68%]' : 'w-[74%]'
+                }`}
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-8 h-[34px] w-full animate-pulse rounded-lg bg-slate-100" />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -320,32 +353,22 @@ function PlanCard({
       <p className="mt-1 text-[13px] text-slate-500">{subtitle}</p>
 
       <div className="mt-5 min-h-[86px]">
-        {showPriceSkeleton ? (
-          <div className="space-y-3">
-            <div className="h-12 w-[128px] animate-pulse rounded-md bg-slate-100" />
-            <div className="h-4 w-[96px] animate-pulse rounded-md bg-slate-100" />
-            <div className="h-4 w-[82px] animate-pulse rounded-md bg-slate-100" />
-          </div>
-        ) : (
-          <>
-            <div className="flex items-end gap-1">
-              <span className="text-[56px] font-bold leading-none tracking-[-0.05em] text-slate-900">
-                {displayPrice}
-              </span>
-              {plan.key !== 'free' && <span className="pb-1 text-[14px] text-slate-500">/month</span>}
-            </div>
+        <div className="flex items-end gap-1">
+          <span className="text-[56px] font-bold leading-none tracking-[-0.05em] text-slate-900">
+            {displayPrice}
+          </span>
+          {plan.key !== 'free' && <span className="pb-1 text-[14px] text-slate-500">/month</span>}
+        </div>
 
-            <p className="mt-2 text-[13px] font-semibold text-emerald-600">
-              {perPageLabel}
-            </p>
+        <p className="mt-2 text-[13px] font-semibold text-emerald-600">
+          {perPageLabel}
+        </p>
 
-            {plan.key !== 'free' && isYearly ? (
-              <p className="mt-1 text-[13px] font-medium text-slate-500">
-                {billedYearlyLabel}
-              </p>
-            ) : null}
-          </>
-        )}
+        {plan.key !== 'free' && isYearly ? (
+          <p className="mt-1 text-[13px] font-medium text-slate-500">
+            {billedYearlyLabel}
+          </p>
+        ) : null}
       </div>
 
       <ul className="mt-6 flex-1 space-y-3">
@@ -388,6 +411,8 @@ function PricingPageContent() {
   const [previewPrices, setPreviewPrices] = useState<PricingPreviewMap>({});
   const [isPreviewPricesLoading, setIsPreviewPricesLoading] = useState(Boolean(PADDLE_CLIENT_TOKEN));
   const [usage, setUsage] = useState<UsageResponse | null>(null);
+  const [isUsageLoading, setIsUsageLoading] = useState(true);
+  const [isCheckoutUsagePolling, setIsCheckoutUsagePolling] = useState(false);
   const paddleInitializedRef = useRef(false);
   const checkoutTargetPlanRef = useRef('');
   const usagePollIntervalRef = useRef<number | null>(null);
@@ -398,13 +423,20 @@ function PricingPageContent() {
   const { user } = useUser();
   const isYearly = billingCycle === 'yearly';
   const currentPaidPlan = usage?.plan && usage.plan !== 'free' ? usage.plan : '';
+  const isPlanDisplayLoading = !isLoaded || (Boolean(isSignedIn) && (isUsageLoading || isCheckoutUsagePolling));
 
   const refreshUsage = useCallback(async (): Promise<UsageResponse | null> => {
-    if (!isLoaded || !isSignedIn) {
-      setUsage(null);
+    if (!isLoaded) {
       return null;
     }
 
+    if (!isSignedIn) {
+      setUsage(null);
+      setIsUsageLoading(false);
+      return null;
+    }
+
+    setIsUsageLoading(true);
     try {
       const token = await getToken({ skipCache: true });
       const response = await getMyUsage(token);
@@ -414,6 +446,8 @@ function PricingPageContent() {
     } catch {
       setUsage(null);
       return null;
+    } finally {
+      setIsUsageLoading(false);
     }
   }, [getToken, isLoaded, isSignedIn]);
 
@@ -424,6 +458,7 @@ function PricingPageContent() {
     }
     usagePollDeadlineRef.current = 0;
     usagePollInFlightRef.current = false;
+    setIsCheckoutUsagePolling(false);
   }, []);
 
   const startCheckoutUsagePolling = useCallback((targetPlan = checkoutTargetPlanRef.current) => {
@@ -433,6 +468,7 @@ function PricingPageContent() {
     }
 
     usagePollDeadlineRef.current = Date.now() + CHECKOUT_USAGE_POLL_TIMEOUT_MS;
+    setIsCheckoutUsagePolling(true);
 
     const pollUsage = async () => {
       if (usagePollInFlightRef.current) {
@@ -474,7 +510,7 @@ function PricingPageContent() {
         token: PADDLE_CLIENT_TOKEN,
         eventCallback: (event) => {
           const eventName = String(event.name || event.type || event.event || '').toLowerCase();
-          if (eventName === 'checkout.completed' || eventName === 'checkout.closed') {
+          if (eventName === 'checkout.completed') {
             startCheckoutUsagePollingRef.current();
           }
         },
@@ -666,6 +702,7 @@ function PricingPageContent() {
                 isYearly={isYearly}
                 isLoaded={isLoaded}
                 isSignedIn={Boolean(isSignedIn)}
+                isSkeleton={isPlanDisplayLoading || isPreviewPricesLoading}
                 isHighlighted={isHighlighted}
                 isCurrentPlan={isCurrentPlan}
                 badge={badge}
