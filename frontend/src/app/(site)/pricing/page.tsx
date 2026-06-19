@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { SignInButton, useAuth, useUser } from '@clerk/nextjs';
 import { Check, Mail, Sparkles, X } from 'lucide-react';
 import Link from 'next/link';
+import { getMyUsage } from '@/lib/api';
+import type { UsageResponse } from '@/types';
 
 declare global {
   interface Window {
@@ -11,7 +13,10 @@ declare global {
       Environment?: {
         set: (environment: string) => void;
       };
-      Initialize: (options: { token: string }) => void;
+      Initialize: (options: {
+        token: string;
+        eventCallback?: (event: { name?: string; type?: string; event?: string }) => void;
+      }) => void;
       PricePreview?: (request: {
         items: { priceId: string; quantity: number }[];
       }) => Promise<{
@@ -43,6 +48,8 @@ declare global {
 
 const PADDLE_CLIENT_TOKEN = process.env.NEXT_PUBLIC_PADDLE_CLIENT_TOKEN || '';
 const PADDLE_ENVIRONMENT = process.env.NEXT_PUBLIC_PADDLE_ENVIRONMENT || 'sandbox';
+const CHECKOUT_USAGE_POLL_TIMEOUT_MS = 15_000;
+const CHECKOUT_USAGE_POLL_INTERVAL_MS = 1_000;
 
 function loadPaddleScript(): Promise<void> {
   if (typeof window === 'undefined') {
@@ -265,6 +272,10 @@ function PlanCard({
   isYearly,
   isLoaded,
   isSignedIn,
+  isHighlighted,
+  isCurrentPlan,
+  badge,
+  subtitle,
   checkoutPlan,
   isPriceLoading,
   previewPrice,
@@ -274,6 +285,10 @@ function PlanCard({
   isYearly: boolean;
   isLoaded: boolean;
   isSignedIn: boolean;
+  isHighlighted: boolean;
+  isCurrentPlan: boolean;
+  badge: string;
+  subtitle: string;
   checkoutPlan: string;
   isPriceLoading: boolean;
   previewPrice?: PricingPreviewMap[(typeof plans)[number]['key']];
@@ -292,17 +307,17 @@ function PlanCard({
   return (
     <div
       className={`relative flex h-full flex-col rounded-2xl border bg-white p-6 transition-all hover:-translate-y-0.5 hover:shadow-md ${
-        plan.highlighted ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-slate-200'
+        isHighlighted ? 'border-emerald-500 shadow-lg shadow-emerald-500/10' : 'border-slate-200'
       }`}
     >
-      {plan.badge && (
+      {badge && (
         <span className="absolute left-1/2 top-0 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-600 px-3 py-1 text-[11px] font-semibold text-white">
-          {plan.badge}
+          {badge}
         </span>
       )}
 
       <h2 className="text-[17px] font-bold text-slate-900">{plan.name}</h2>
-      <p className="mt-1 text-[13px] text-slate-500">{plan.subtitle}</p>
+      <p className="mt-1 text-[13px] text-slate-500">{subtitle}</p>
 
       <div className="mt-5 min-h-[86px]">
         {showPriceSkeleton ? (
@@ -342,10 +357,10 @@ function PlanCard({
         ))}
       </ul>
 
-      {plan.key !== 'free' && isLoaded && !isSignedIn ? (
+      {isCurrentPlan ? null : plan.key !== 'free' && isLoaded && !isSignedIn ? (
         <SignInButton mode="modal">
           <button className={`mt-8 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all ${
-            plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
+            isHighlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
           }`}>
             Sign in to choose
           </button>
@@ -356,7 +371,7 @@ function PlanCard({
           onClick={() => onSelect(plan)}
           disabled={checkoutPlan === plan.key}
           className={`mt-8 w-full rounded-lg px-4 py-2 text-[13px] font-semibold text-white transition-all disabled:cursor-wait disabled:opacity-70 ${
-            plan.highlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
+            isHighlighted ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-900 hover:bg-slate-800'
           }`}
         >
           {checkoutPlan === plan.key ? 'Opening checkout...' : plan.button}
@@ -372,10 +387,79 @@ function PricingPageContent() {
   const [isContactOpen, setIsContactOpen] = useState(false);
   const [previewPrices, setPreviewPrices] = useState<PricingPreviewMap>({});
   const [isPreviewPricesLoading, setIsPreviewPricesLoading] = useState(Boolean(PADDLE_CLIENT_TOKEN));
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
   const paddleInitializedRef = useRef(false);
-  const { isLoaded, isSignedIn } = useAuth();
+  const checkoutTargetPlanRef = useRef('');
+  const usagePollIntervalRef = useRef<number | null>(null);
+  const usagePollDeadlineRef = useRef(0);
+  const usagePollInFlightRef = useRef(false);
+  const startCheckoutUsagePollingRef = useRef<() => void>(() => {});
+  const { getToken, isLoaded, isSignedIn } = useAuth();
   const { user } = useUser();
   const isYearly = billingCycle === 'yearly';
+  const currentPaidPlan = usage?.plan && usage.plan !== 'free' ? usage.plan : '';
+
+  const refreshUsage = useCallback(async (): Promise<UsageResponse | null> => {
+    if (!isLoaded || !isSignedIn) {
+      setUsage(null);
+      return null;
+    }
+
+    try {
+      const token = await getToken({ skipCache: true });
+      const response = await getMyUsage(token);
+      const nextUsage = response.success ? response : null;
+      setUsage(nextUsage);
+      return nextUsage;
+    } catch {
+      setUsage(null);
+      return null;
+    }
+  }, [getToken, isLoaded, isSignedIn]);
+
+  const stopCheckoutUsagePolling = useCallback(() => {
+    if (usagePollIntervalRef.current) {
+      window.clearInterval(usagePollIntervalRef.current);
+      usagePollIntervalRef.current = null;
+    }
+    usagePollDeadlineRef.current = 0;
+    usagePollInFlightRef.current = false;
+  }, []);
+
+  const startCheckoutUsagePolling = useCallback((targetPlan = checkoutTargetPlanRef.current) => {
+    const normalizedTargetPlan = targetPlan.trim().toLowerCase();
+    if (!normalizedTargetPlan || normalizedTargetPlan === 'free' || usagePollIntervalRef.current) {
+      return;
+    }
+
+    usagePollDeadlineRef.current = Date.now() + CHECKOUT_USAGE_POLL_TIMEOUT_MS;
+
+    const pollUsage = async () => {
+      if (usagePollInFlightRef.current) {
+        return;
+      }
+
+      usagePollInFlightRef.current = true;
+      try {
+        const nextUsage = await refreshUsage();
+        if (nextUsage?.plan === normalizedTargetPlan || Date.now() >= usagePollDeadlineRef.current) {
+          checkoutTargetPlanRef.current = '';
+          stopCheckoutUsagePolling();
+        }
+      } finally {
+        usagePollInFlightRef.current = false;
+      }
+    };
+
+    void pollUsage();
+    usagePollIntervalRef.current = window.setInterval(() => {
+      void pollUsage();
+    }, CHECKOUT_USAGE_POLL_INTERVAL_MS);
+  }, [refreshUsage, stopCheckoutUsagePolling]);
+
+  useEffect(() => {
+    startCheckoutUsagePollingRef.current = () => startCheckoutUsagePolling();
+  }, [startCheckoutUsagePolling]);
 
   const initializePaddle = async () => {
     await loadPaddleScript();
@@ -386,7 +470,15 @@ function PricingPageContent() {
 
     if (!paddleInitializedRef.current) {
       window.Paddle.Environment?.set(PADDLE_ENVIRONMENT);
-      window.Paddle.Initialize({ token: PADDLE_CLIENT_TOKEN });
+      window.Paddle.Initialize({
+        token: PADDLE_CLIENT_TOKEN,
+        eventCallback: (event) => {
+          const eventName = String(event.name || event.type || event.event || '').toLowerCase();
+          if (eventName === 'checkout.completed' || eventName === 'checkout.closed') {
+            startCheckoutUsagePollingRef.current();
+          }
+        },
+      });
       paddleInitializedRef.current = true;
     }
 
@@ -473,6 +565,14 @@ function PricingPageContent() {
     loadPreviewPrices();
   }, []);
 
+  useEffect(() => {
+    void refreshUsage();
+  }, [refreshUsage]);
+
+  useEffect(() => {
+    return () => stopCheckoutUsagePolling();
+  }, [stopCheckoutUsagePolling]);
+
   const handleCheckout = async (plan: (typeof plans)[number]) => {
     if (plan.key === 'free') {
       window.location.href = '/';
@@ -496,6 +596,7 @@ function PricingPageContent() {
 
     try {
       setCheckoutPlan(plan.key);
+      checkoutTargetPlanRef.current = plan.key;
       const paddle = await initializePaddle();
 
       const email = user.primaryEmailAddress?.emailAddress;
@@ -552,19 +653,30 @@ function PricingPageContent() {
         </section>
 
         <section className="mt-12 grid gap-4 xl:grid-cols-4">
-          {plans.map((plan) => (
-            <PlanCard
-              key={plan.key}
-              plan={plan}
-              isYearly={isYearly}
-              isLoaded={isLoaded}
-              isSignedIn={Boolean(isSignedIn)}
-              checkoutPlan={checkoutPlan}
-              isPriceLoading={isPreviewPricesLoading}
-              previewPrice={previewPrices[plan.key]}
-              onSelect={handleCheckout}
-            />
-          ))}
+          {plans.map((plan) => {
+            const isCurrentPlan = currentPaidPlan === plan.key;
+            const isHighlighted = currentPaidPlan ? isCurrentPlan : plan.highlighted;
+            const badge = isCurrentPlan ? 'CurrentPlan' : currentPaidPlan ? '' : plan.badge;
+            const subtitle = plan.subtitle;
+
+            return (
+              <PlanCard
+                key={plan.key}
+                plan={plan}
+                isYearly={isYearly}
+                isLoaded={isLoaded}
+                isSignedIn={Boolean(isSignedIn)}
+                isHighlighted={isHighlighted}
+                isCurrentPlan={isCurrentPlan}
+                badge={badge}
+                subtitle={subtitle}
+                checkoutPlan={checkoutPlan}
+                isPriceLoading={isPreviewPricesLoading}
+                previewPrice={previewPrices[plan.key]}
+                onSelect={handleCheckout}
+              />
+            );
+          })}
         </section>
 
         <section className="mx-auto mt-20 max-w-[840px]">
