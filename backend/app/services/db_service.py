@@ -34,6 +34,8 @@ class DatabaseService:
                     paddle_customer_id TEXT,
                     paddle_subscription_id TEXT,
                     paddle_price_id TEXT,
+                    paddle_current_period_start TEXT,
+                    paddle_current_period_end TEXT,
                     paddle_subscription_updated_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -144,8 +146,12 @@ class DatabaseService:
                 CREATE INDEX IF NOT EXISTS idx_exports_task_id ON exports(task_id);
                 CREATE INDEX IF NOT EXISTS idx_exports_user_id ON exports(user_id);
                 CREATE INDEX IF NOT EXISTS idx_usage_events_user_month ON usage_events(user_id, usage_month);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_user_created_at ON usage_events(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_usage_events_user_plan_month ON usage_events(user_id, plan, usage_month);
                 CREATE INDEX IF NOT EXISTS idx_usage_events_task_id ON usage_events(task_id);
                 CREATE INDEX IF NOT EXISTS idx_usage_page_events_user_month ON usage_page_events(user_id, usage_month);
+                CREATE INDEX IF NOT EXISTS idx_usage_page_events_user_created_at ON usage_page_events(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_usage_page_events_user_plan_month ON usage_page_events(user_id, plan, usage_month);
                 CREATE INDEX IF NOT EXISTS idx_usage_page_events_task_id ON usage_page_events(task_id);
                 """
             )
@@ -154,6 +160,8 @@ class DatabaseService:
             self._ensure_column(connection, "users", "paddle_customer_id", "TEXT")
             self._ensure_column(connection, "users", "paddle_subscription_id", "TEXT")
             self._ensure_column(connection, "users", "paddle_price_id", "TEXT")
+            self._ensure_column(connection, "users", "paddle_current_period_start", "TEXT")
+            self._ensure_column(connection, "users", "paddle_current_period_end", "TEXT")
             self._ensure_column(connection, "users", "paddle_subscription_updated_at", "TEXT")
             self._ensure_column(connection, "files", "storage_provider", "TEXT NOT NULL DEFAULT 'local'")
             self._ensure_column(connection, "files", "storage_key", "TEXT NOT NULL DEFAULT ''")
@@ -221,23 +229,59 @@ class DatabaseService:
         paddle_customer_id: Optional[str] = None,
         paddle_subscription_id: Optional[str] = None,
         paddle_price_id: Optional[str] = None,
+        paddle_current_period_start: Optional[str] = None,
+        paddle_current_period_end: Optional[str] = None,
     ) -> None:
         now = _utc_now()
         with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT plan, subscription_status, paddle_subscription_id,
+                       paddle_current_period_start, paddle_current_period_end
+                FROM users
+                WHERE id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            is_paid_active = plan != "free" and subscription_status in {"active", "trialing"}
+            if is_paid_active and not paddle_current_period_start:
+                same_active_subscription = (
+                    existing
+                    and str(existing["plan"]) == plan
+                    and str(existing["subscription_status"]) in {"active", "trialing"}
+                    and (
+                        not paddle_subscription_id
+                        or not existing["paddle_subscription_id"]
+                        or str(existing["paddle_subscription_id"]) == str(paddle_subscription_id)
+                    )
+                )
+                if same_active_subscription and existing["paddle_current_period_start"]:
+                    paddle_current_period_start = str(existing["paddle_current_period_start"])
+                else:
+                    paddle_current_period_start = now
+            if is_paid_active and not paddle_current_period_end and existing:
+                paddle_current_period_end = existing["paddle_current_period_end"]
+            if not is_paid_active:
+                paddle_current_period_start = None
+                paddle_current_period_end = None
+
             connection.execute(
                 """
                 INSERT INTO users (
                     id, plan, subscription_status, paddle_customer_id,
                     paddle_subscription_id, paddle_price_id,
+                    paddle_current_period_start, paddle_current_period_end,
                     paddle_subscription_updated_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     plan = excluded.plan,
                     subscription_status = excluded.subscription_status,
                     paddle_customer_id = COALESCE(excluded.paddle_customer_id, users.paddle_customer_id),
                     paddle_subscription_id = COALESCE(excluded.paddle_subscription_id, users.paddle_subscription_id),
                     paddle_price_id = COALESCE(excluded.paddle_price_id, users.paddle_price_id),
+                    paddle_current_period_start = excluded.paddle_current_period_start,
+                    paddle_current_period_end = excluded.paddle_current_period_end,
                     paddle_subscription_updated_at = excluded.paddle_subscription_updated_at,
                     updated_at = excluded.updated_at
                 """,
@@ -248,6 +292,8 @@ class DatabaseService:
                     paddle_customer_id,
                     paddle_subscription_id,
                     paddle_price_id,
+                    paddle_current_period_start,
+                    paddle_current_period_end,
                     now,
                     now,
                     now,
@@ -416,17 +462,50 @@ class DatabaseService:
     def get_current_usage_month(self) -> str:
         return datetime.now(timezone.utc).strftime("%Y-%m")
 
-    def get_user_monthly_usage(self, user_id: str, usage_month: Optional[str] = None) -> int:
+    def get_user_monthly_usage(
+        self,
+        user_id: str,
+        usage_month: Optional[str] = None,
+        *,
+        created_at_gte: Optional[str] = None,
+        created_at_lt: Optional[str] = None,
+        plan: Optional[str] = None,
+    ) -> int:
         month = usage_month or self.get_current_usage_month()
+        event_filters = ["user_id = ?"]
+        event_values: list[Any] = [user_id]
+        page_event_filters = ["user_id = ?"]
+        page_event_values: list[Any] = [user_id]
+        if plan:
+            event_filters.append("plan = ?")
+            event_values.append(plan)
+            page_event_filters.append("plan = ?")
+            page_event_values.append(plan)
+        if created_at_gte:
+            event_filters.append("created_at >= ?")
+            event_values.append(created_at_gte)
+            page_event_filters.append("created_at >= ?")
+            page_event_values.append(created_at_gte)
+        else:
+            event_filters.append("usage_month = ?")
+            event_values.append(month)
+            page_event_filters.append("usage_month = ?")
+            page_event_values.append(month)
+        if created_at_lt:
+            event_filters.append("created_at < ?")
+            event_values.append(created_at_lt)
+            page_event_filters.append("created_at < ?")
+            page_event_values.append(created_at_lt)
+
         with self._connect() as connection:
             row = connection.execute(
-                """
+                f"""
                 SELECT (
-                    COALESCE((SELECT SUM(pages) FROM usage_events WHERE user_id = ? AND usage_month = ?), 0) +
-                    COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE user_id = ? AND usage_month = ?), 0)
+                    COALESCE((SELECT SUM(pages) FROM usage_events WHERE {' AND '.join(event_filters)}), 0) +
+                    COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE {' AND '.join(page_event_filters)}), 0)
                 ) AS used_pages
                 """,
-                (user_id, month, user_id, month),
+                (*event_values, *page_event_values),
             ).fetchone()
 
         return int(row["used_pages"] or 0) if row else 0
@@ -592,6 +671,9 @@ class DatabaseService:
         page_number: int,
         usage_month: Optional[str] = None,
         monthly_page_quota: Optional[int] = None,
+        created_at_gte: Optional[str] = None,
+        created_at_lt: Optional[str] = None,
+        usage_plan: Optional[str] = None,
     ) -> bool:
         month = usage_month or self.get_current_usage_month()
         now = _utc_now()
@@ -610,14 +692,39 @@ class DatabaseService:
                 return True
 
             if monthly_page_quota is not None and monthly_page_quota > 0:
+                event_filters = ["user_id = ?"]
+                event_values: list[Any] = [user_id]
+                page_event_filters = ["user_id = ?"]
+                page_event_values: list[Any] = [user_id]
+                if usage_plan:
+                    event_filters.append("plan = ?")
+                    event_values.append(usage_plan)
+                    page_event_filters.append("plan = ?")
+                    page_event_values.append(usage_plan)
+                if created_at_gte:
+                    event_filters.append("created_at >= ?")
+                    event_values.append(created_at_gte)
+                    page_event_filters.append("created_at >= ?")
+                    page_event_values.append(created_at_gte)
+                else:
+                    event_filters.append("usage_month = ?")
+                    event_values.append(month)
+                    page_event_filters.append("usage_month = ?")
+                    page_event_values.append(month)
+                if created_at_lt:
+                    event_filters.append("created_at < ?")
+                    event_values.append(created_at_lt)
+                    page_event_filters.append("created_at < ?")
+                    page_event_values.append(created_at_lt)
+
                 row = connection.execute(
-                    """
+                    f"""
                     SELECT (
-                        COALESCE((SELECT SUM(pages) FROM usage_events WHERE user_id = ? AND usage_month = ?), 0) +
-                        COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE user_id = ? AND usage_month = ?), 0)
+                        COALESCE((SELECT SUM(pages) FROM usage_events WHERE {' AND '.join(event_filters)}), 0) +
+                        COALESCE((SELECT COUNT(*) FROM usage_page_events WHERE {' AND '.join(page_event_filters)}), 0)
                     ) AS used_pages
                     """,
-                    (user_id, month, user_id, month),
+                    (*event_values, *page_event_values),
                 ).fetchone()
                 used_pages = int(row["used_pages"] or 0) if row else 0
                 if used_pages >= monthly_page_quota:

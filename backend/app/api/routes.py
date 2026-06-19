@@ -10,6 +10,7 @@ import hmac
 import json
 import re
 import time
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from app.services.pdf_service import PDFService
@@ -304,6 +305,35 @@ def _get_paddle_plan(data: Dict[str, Any]) -> str:
     return "free"
 
 
+def _normalize_iso_datetime(value: Any) -> Optional[str]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    raw_value = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _get_paddle_current_period(data: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+    period = (
+        data.get("current_billing_period")
+        or data.get("billing_period")
+        or data.get("current_period")
+    )
+    starts_at = None
+    ends_at = None
+    if isinstance(period, dict):
+        starts_at = period.get("starts_at") or period.get("start_at") or period.get("started_at")
+        ends_at = period.get("ends_at") or period.get("end_at") or period.get("ended_at")
+
+    return _normalize_iso_datetime(starts_at), _normalize_iso_datetime(ends_at)
+
+
 def _get_paddle_user_id(data: Dict[str, Any]) -> Optional[str]:
     custom_data = data.get("custom_data")
     if not isinstance(custom_data, dict):
@@ -343,6 +373,11 @@ def _get_user_plan_metadata(user_id: str) -> tuple[Dict[str, Any], PlanLimits]:
             "maxFileSizeMB": limits.max_file_size_mb,
             "monthlyPageQuota": limits.monthly_page_quota,
             "freePreviewPages": limits.free_preview_pages,
+            "usagePeriodStart": (
+                user_record.get("paddle_current_period_start")
+                or user_record.get("paddle_subscription_updated_at")
+            ),
+            "usagePeriodEnd": user_record.get("paddle_current_period_end"),
         },
         limits,
     )
@@ -356,7 +391,13 @@ def _get_page_translation_limit(total_pages: int, user_id: str) -> tuple[int, Di
 def _get_usage_summary(user_id: str) -> Dict[str, Any]:
     plan_metadata, limits = _get_user_plan_metadata(user_id)
     usage_month = db_service.get_current_usage_month()
-    used_pages = db_service.get_user_monthly_usage(user_id, usage_month)
+    usage_period_start = plan_metadata.get("usagePeriodStart") if limits.plan != "free" else None
+    used_pages = db_service.get_user_monthly_usage(
+        user_id,
+        usage_month,
+        created_at_gte=usage_period_start,
+        plan="free" if limits.plan == "free" else None,
+    )
     monthly_quota = limits.monthly_page_quota
     remaining_pages = max(monthly_quota - used_pages, 0) if monthly_quota > 0 else None
 
@@ -910,6 +951,8 @@ async def _process_translation_page(
                     page_number=page_number,
                     usage_month=plan_metadata.get("usageMonth"),
                     monthly_page_quota=plan_metadata.get("monthlyPageQuota"),
+                    created_at_gte=plan_metadata.get("usagePeriodStart"),
+                    usage_plan="free" if plan_metadata.get("plan") == "free" else None,
                 )
                 if not usage_reserved:
                     raise RuntimeError(
@@ -1033,6 +1076,7 @@ async def paddle_webhook(request: Request):
                 plan = "free"
                 subscription_status = "inactive"
 
+            period_start, period_end = _get_paddle_current_period(data)
             db_service.update_user_subscription(
                 user_id=user_id,
                 plan=plan,
@@ -1040,6 +1084,8 @@ async def paddle_webhook(request: Request):
                 paddle_customer_id=data.get("customer_id"),
                 paddle_subscription_id=data.get("id"),
                 paddle_price_id=price_id,
+                paddle_current_period_start=period_start,
+                paddle_current_period_end=period_end,
             )
             safe_print(
                 "[PADDLE] Subscription synced: "
