@@ -198,7 +198,12 @@ class PDFLayoutAnalyzer:
             page_rect,
             page_num,
         )
-        layout_role = self._classify_layout_role(block_payload, page_rect)
+        block_payload["is_attribution_metadata"] = self._is_attribution_metadata_block(
+            block_payload,
+            page_rect,
+            page_num,
+        )
+        layout_role = self._classify_layout_role(block_payload, page_rect, page_num)
         block_payload["layout_role"] = layout_role
         block_payload["is_metadata"] = layout_role == "metadata"
         block_payload["is_dense_reference"] = layout_role == "dense_reference"
@@ -224,7 +229,17 @@ class PDFLayoutAnalyzer:
         width_ratio = rect.width / page_width
         top_band = rect.y0 <= page_height * 0.09
         bottom_band = rect.y1 >= page_height * 0.94
+        lower_page_region = rect.y0 >= page_height * 0.72
         side_or_corner = rect.x0 <= page_width * 0.12 or rect.x1 >= page_width * 0.86
+        has_url = any(token in text_lower for token in ("www.", "http://", "https://", ".org", ".com", ".edu"))
+        has_email = "@" in clean_text and "." in clean_text
+        has_open_access = "open access" in text_lower
+        has_article_online = "article is online" in text_lower
+        has_contact_marker = bool(re.search(r"\b(?:corresponding author|e-?mail|email|doi)\b", text_lower))
+        has_metadata_markers = bool(re.search(
+            r"\b(?:issn|doi|vol\.?|volume|issue|copyright|published|publisher|license)\b",
+            text_lower,
+        ))
 
         if any(marker in text_lower for marker in ("doi:", "copyright", "all rights reserved", "macmillan publishers")):
             return True
@@ -233,6 +248,21 @@ class PDFLayoutAnalyzer:
         if bottom_band and font_size <= 7.5 and line_count <= 4:
             return True
         if bottom_band and re.search(r"\b(?:nature|science|cell|volume|vol)\b", text_lower) and len(clean_text) <= 120:
+            return True
+        if (
+            lower_page_region
+            and font_size <= 8.5
+            and line_count <= 5
+            and len(clean_text) <= 320
+            and (
+                has_url
+                or has_email
+                or has_open_access
+                or has_article_online
+                or has_contact_marker
+                or has_metadata_markers
+            )
+        ):
             return True
 
         letters = [char for char in compact_text if char.isalpha()]
@@ -248,6 +278,78 @@ class PDFLayoutAnalyzer:
             return True
 
         return False
+
+    def _is_attribution_metadata_block(
+        self,
+        block: Dict[str, Any],
+        page_rect: fitz.Rect,
+        page_num: int,
+    ) -> bool:
+        if page_num != 0:
+            return False
+
+        rect = block_rect(block)
+        clean_text = normalize_pdf_text(block.get("text", ""))
+        if not clean_text or rect.is_empty or page_rect.width <= 0 or page_rect.height <= 0:
+            return False
+
+        page_width = max(page_rect.width, 1.0)
+        page_height = max(page_rect.height, 1.0)
+        if rect.y0 < page_height * 0.68:
+            return False
+
+        line_texts = [
+            normalize_pdf_text(line.get("text", ""))
+            for line in block.get("lines", [])
+            if normalize_pdf_text(line.get("text", ""))
+        ]
+        line_count = len(line_texts)
+        if line_count == 0 or line_count > 4:
+            return False
+
+        font_size = float(block.get("font_size") or 0)
+        if font_size > 30:
+            return False
+
+        text_lower = clean_text.lower()
+        word_count = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9.'@_-]*", clean_text))
+        if word_count > 24 or len(clean_text) > 180:
+            return False
+
+        width_ratio = rect.width / page_width
+        centered_or_compact = (
+            width_ratio <= 0.70
+            or abs((rect.x0 + rect.x1) / 2 - page_width / 2) <= page_width * 0.28
+        )
+        if not centered_or_compact:
+            return False
+
+        if self._ends_sentence(clean_text):
+            return False
+        if re.search(r"[.!?;:]\s+[A-Z]", clean_text):
+            return False
+
+        has_handle = bool(re.search(r"(?<![\w.])@[A-Za-z0-9_]{2,30}\b", clean_text))
+        has_byline = bool(re.match(r"(?i)^(?:by|from|via)\s+(?:@|[A-Z0-9])", clean_text))
+        has_credit_role = bool(re.search(
+            r"\b(?:author|creator|maker|founder|co[- ]?founder|designer|illustrator|editor)\b",
+            text_lower,
+        ))
+        has_made_by_phrase = bool(re.search(r"\b(?:made|built|written|created|designed)\s+by\b", text_lower))
+        has_brand_separator = clean_text.count("+") >= 2 and word_count <= 18
+        has_role_separator = clean_text.count("+") >= 1 and bool(re.search(
+            r"\b(?:founder|creator|maker|author|designer)\b",
+            text_lower,
+        ))
+
+        return bool(
+            has_handle
+            or has_byline
+            or has_credit_role
+            or has_made_by_phrase
+            or has_brand_separator
+            or has_role_separator
+        )
 
     def _is_dense_reference_block(self, block: Dict[str, Any], page_rect: fitz.Rect) -> bool:
         rect = block_rect(block)
@@ -285,12 +387,14 @@ class PDFLayoutAnalyzer:
 
         return False
 
-    def _classify_layout_role(self, block: Dict[str, Any], page_rect: fitz.Rect) -> str:
+    def _classify_layout_role(self, block: Dict[str, Any], page_rect: fitz.Rect, page_num: int = 0) -> str:
         rect = block_rect(block)
         if rect.is_empty or page_rect.width <= 0 or page_rect.height <= 0:
             return "body"
 
         if self._is_publication_metadata_block(block, page_rect):
+            return "metadata"
+        if block.get("is_attribution_metadata") or self._is_attribution_metadata_block(block, page_rect, page_num):
             return "metadata"
         if self._is_dense_reference_block(block, page_rect):
             return "dense_reference"
@@ -766,8 +870,6 @@ class PDFLayoutAnalyzer:
         bottom_band = max(42.0, page_rect.height * 0.08)
         in_top_band = rect.y0 <= top_band
         in_bottom_band = rect.y1 >= page_rect.height - bottom_band
-        if not (in_top_band or in_bottom_band):
-            return False
 
         clean_text = normalize_pdf_text(block.get("text", ""))
         if not clean_text:
@@ -781,7 +883,32 @@ class PDFLayoutAnalyzer:
         has_metadata_markers = bool(re.search(r"\b(?:issn|doi|vol\.?|volume|issue|copyright)\b", clean_text, re.IGNORECASE))
         has_publisher_marker = "published by" in text_lower
         has_copyright_marker = "\u00a9" in clean_text or "(c)" in text_lower
+        has_open_access = "open access" in text_lower
+        has_article_online = "article is online" in text_lower
+        has_contact_marker = bool(re.search(r"\b(?:corresponding author|e-?mail|email)\b", text_lower))
         has_volume_page_pattern = bool(re.search(r"\b\d{1,3}\s*:\s*\d{2,6}(?:\s*[-\u2013\u2014]\s*\d{2,6})?\b", clean_text))
+        font_size = float(block.get("font_size") or 0)
+        line_texts = [
+            normalize_pdf_text(line.get("text", ""))
+            for line in block.get("lines", [])
+            if normalize_pdf_text(line.get("text", ""))
+        ]
+        line_count = len(line_texts)
+        lower_page_region = rect.y0 >= page_rect.height * 0.72
+        strong_lower_metadata = (
+            lower_page_region
+            and font_size <= 8.5
+            and line_count <= 5
+            and len(clean_text) <= 320
+            and (
+                has_url
+                or has_email
+                or has_open_access
+                or has_article_online
+                or has_contact_marker
+                or has_metadata_markers
+            )
+        )
         strong_bottom_metadata = (
             in_bottom_band and
             (
@@ -792,19 +919,15 @@ class PDFLayoutAnalyzer:
             )
         )
 
-        if strong_bottom_metadata:
+        if strong_bottom_metadata or strong_lower_metadata:
             return True
 
-        line_texts = [
-            normalize_pdf_text(line.get("text", ""))
-            for line in block.get("lines", [])
-            if normalize_pdf_text(line.get("text", ""))
-        ]
-        line_count = len(line_texts)
+        if not (in_top_band or in_bottom_band):
+            return False
+
         if line_count == 0 or line_count > 4 or len(clean_text) > 120:
             return False
 
-        font_size = float(block.get("font_size") or 0)
         if font_size > 14:
             return False
 
@@ -1113,6 +1236,9 @@ class PDFLayoutAnalyzer:
         else:
             merged.pop("layout_column", None)
         merged["is_metadata"] = bool(previous.get("is_metadata") or current.get("is_metadata"))
+        merged["is_attribution_metadata"] = bool(
+            previous.get("is_attribution_metadata") or current.get("is_attribution_metadata")
+        )
         merged["is_dense_reference"] = bool(previous.get("is_dense_reference") or current.get("is_dense_reference"))
         merged["is_marginalia"] = bool(previous.get("is_marginalia") or current.get("is_marginalia"))
         merged["is_vertical_text"] = bool(previous.get("is_vertical_text") or current.get("is_vertical_text"))

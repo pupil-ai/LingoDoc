@@ -24,6 +24,7 @@ from app.services.pdf_text_utils import (
     is_symbol_emoji_text,
     normalize_pdf_text,
 )
+from app.services.translation_text_utils import sanitize_translated_text
 from app.services.storage_service import storage_service
 
 
@@ -666,13 +667,23 @@ class PDFService(PDFLayoutAnalyzer):
     def _split_leading_marker(self, translated_text: str, source_text: str):
         translated_marker, translated, translated_has_marker = self._split_marker_prefix(translated_text)
         source_marker, _, source_has_marker = self._split_marker_prefix(source_text)
+        translated_visual_marker, translated_visual, translated_has_visual_marker = (
+            self._split_preserved_visual_marker_prefix(translated_text)
+        )
+        source_visual_marker, _, source_has_visual_marker = self._split_preserved_visual_marker_prefix(source_text)
 
         marker = ""
         if translated_has_marker:
             marker = translated_marker
         elif source_has_marker:
             marker = source_marker
-            translated = normalize_pdf_text(translated_text)
+            translated = self._strip_render_marker_prefix(translated_text)
+        elif translated_has_visual_marker:
+            marker = translated_visual_marker
+            translated = translated_visual
+        elif source_has_visual_marker:
+            marker = source_visual_marker
+            translated = self._strip_render_marker_prefix(translated_text)
 
         return marker, translated
 
@@ -731,6 +742,142 @@ class PDFService(PDFLayoutAnalyzer):
         except Exception:
             return []
         return [] if span_rect.is_empty else [span_rect]
+
+    def _split_preserved_visual_marker_prefix(self, text: str):
+        clean_text = normalize_pdf_text(text)
+        marker_chars = []
+        saw_visual = False
+        saw_prefix = False
+        index = 0
+
+        while index < len(clean_text):
+            char = clean_text[index]
+            if char.isspace() and saw_prefix:
+                index += 1
+                continue
+            if char in {"\x00", "\ufffd", "\ufe0f", "\u200d"}:
+                saw_prefix = True
+                index += 1
+                continue
+            if char in MARKER_GLYPHS or is_symbol_emoji(char):
+                saw_prefix = True
+                if is_symbol_emoji(char):
+                    saw_visual = True
+                marker_chars.append(char)
+                index += 1
+                continue
+            break
+
+        if not saw_visual:
+            return "", clean_text, False
+
+        marker = "".join(marker_chars) or "\u2022"
+        return marker, clean_text[index:].strip(), True
+
+    def _strip_render_marker_prefix(self, text: str) -> str:
+        clean_text = normalize_pdf_text(text)
+        index = 0
+        saw_prefix = False
+
+        while index < len(clean_text):
+            char = clean_text[index]
+            if char.isspace() and saw_prefix:
+                index += 1
+                continue
+            if char in {"\x00", "\ufffd", "\ufe0f", "\u200d"} or char in MARKER_GLYPHS or is_symbol_emoji(char):
+                saw_prefix = True
+                index += 1
+                continue
+            break
+
+        return clean_text[index:].strip() if saw_prefix else clean_text
+
+    def _span_preserved_visual_rects(self, span: Dict[str, Any]) -> List[fitz.Rect]:
+        rects: List[fitz.Rect] = []
+        for char_info in span.get("char_bboxes") or []:
+            char = str(char_info.get("char") or "")
+            if not char or char in {"\ufe0f", "\u200d"} or not is_symbol_emoji(char):
+                continue
+            bbox = char_info.get("bbox")
+            if not bbox:
+                continue
+            try:
+                char_rect = self._rect_from_bbox_mapping(bbox)
+            except Exception:
+                continue
+            if not char_rect.is_empty:
+                rects.append(char_rect)
+
+        if rects:
+            return rects
+
+        span_text = normalize_pdf_text(span.get("text", ""))
+        if not span_text or not is_symbol_emoji_text(span_text):
+            return []
+
+        bbox = span.get("bbox")
+        if not bbox:
+            return []
+        try:
+            span_rect = self._rect_from_bbox_mapping(bbox)
+        except Exception:
+            return []
+        return [] if span_rect.is_empty else [span_rect]
+
+    def _block_preserved_visual_rects(self, block: Dict[str, Any]) -> List[fitz.Rect]:
+        rects: List[fitz.Rect] = []
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                rects.extend(self._span_preserved_visual_rects(span))
+        return rects
+
+    def _leading_preserved_visual_rects(
+        self,
+        block: Dict[str, Any],
+        source_rect: fitz.Rect,
+        font_size: float,
+    ) -> List[fitz.Rect]:
+        rects = self._block_preserved_visual_rects(block)
+        if not rects or source_rect.is_empty:
+            return []
+
+        first_line_rect = None
+        for line in block.get("lines", []):
+            if not normalize_pdf_text(line.get("text", "")):
+                continue
+            bbox = line.get("bbox")
+            if not bbox:
+                continue
+            try:
+                first_line_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+            except Exception:
+                first_line_rect = None
+            break
+
+        if first_line_rect is None or first_line_rect.is_empty:
+            first_line_rect = source_rect
+
+        _, _, has_visual_marker = self._split_preserved_visual_marker_prefix(block.get("text", ""))
+        leading_band_width = (
+            max(font_size * 4.5, 28.0)
+            if has_visual_marker
+            else max(font_size * 0.8, 8.0)
+        )
+        leading_limit = min(source_rect.x1, first_line_rect.x0 + leading_band_width)
+        leading_rects: List[fitz.Rect] = []
+
+        for rect in rects:
+            if rect.is_empty:
+                continue
+            vertical_overlap = min(first_line_rect.y1, rect.y1) - max(first_line_rect.y0, rect.y0)
+            min_height = max(min(first_line_rect.height, rect.height), 1.0)
+            if vertical_overlap < min_height * 0.35:
+                continue
+            if rect.x0 > leading_limit:
+                continue
+            leading_rects.append(rect)
+
+        return leading_rects
 
     def _iter_redaction_rects_for_blocks(self, blocks: List[Dict[str, Any]]) -> List[fitz.Rect]:
         rects: List[fitz.Rect] = []
@@ -1206,15 +1353,19 @@ class PDFService(PDFLayoutAnalyzer):
         source_rect: fitz.Rect,
         target_rect: fitz.Rect,
         font_size: float,
+        max_source_x: float = None,
     ) -> float:
         if source_rect.is_empty or target_rect.is_empty:
             return 0
 
         clip_width = min(source_rect.width, max(font_size * 1.25, source_rect.height * 0.7))
+        clip_x1 = min(source_rect.x1, source_rect.x0 + clip_width)
+        if max_source_x is not None:
+            clip_x1 = min(clip_x1, max_source_x)
         clip_rect = fitz.Rect(
             source_rect.x0,
             source_rect.y0,
-            min(source_rect.x1, source_rect.x0 + clip_width),
+            clip_x1,
             source_rect.y1,
         )
         if clip_rect.is_empty:
@@ -1337,6 +1488,32 @@ class PDFService(PDFLayoutAnalyzer):
         if measure_font:
             return measure_font.text_length(text, fontsize=font_size)
         return fitz.get_text_length(text, fontname=font_name, fontsize=font_size)
+
+    def _sanitize_text_for_render_font(self, text: str, measure_font=None) -> str:
+        clean_text = sanitize_translated_text(text)
+        if not clean_text or measure_font is None or not hasattr(measure_font, "has_glyph"):
+            return clean_text
+
+        filtered_chars: List[str] = []
+        previous_was_space = False
+        for char in clean_text:
+            if char.isspace():
+                if not previous_was_space:
+                    filtered_chars.append(" ")
+                previous_was_space = True
+                continue
+
+            try:
+                has_glyph = bool(measure_font.has_glyph(ord(char)))
+            except Exception:
+                has_glyph = True
+            if not has_glyph:
+                continue
+
+            filtered_chars.append(char)
+            previous_was_space = False
+
+        return normalize_pdf_text("".join(filtered_chars))
 
     def _insert_text_line_with_reference_markers(
         self,
@@ -1518,7 +1695,7 @@ class PDFService(PDFLayoutAnalyzer):
         first_line_indent: float = 0.0,
     ) -> bool:
         leading_ideographic_spaces = "\u3000" * (len(text or "") - len((text or "").lstrip("\u3000")))
-        clean_text = normalize_pdf_text(text)
+        clean_text = self._sanitize_text_for_render_font(text, measure_font)
         if leading_ideographic_spaces and clean_text:
             clean_text = f"{leading_ideographic_spaces}{clean_text}"
         if not clean_text or rect.width <= 0 or rect.height <= 0:
@@ -1642,7 +1819,7 @@ class PDFService(PDFLayoutAnalyzer):
         first_line_indent: float = 0.0,
     ) -> float:
         leading_ideographic_spaces = "\u3000" * (len(text or "") - len((text or "").lstrip("\u3000")))
-        clean_text = normalize_pdf_text(text)
+        clean_text = self._sanitize_text_for_render_font(text, measure_font)
         if leading_ideographic_spaces and clean_text:
             clean_text = f"{leading_ideographic_spaces}{clean_text}"
         if not clean_text or rect.width <= 0 or rect.height <= 0 or font_size <= 0:
@@ -1736,7 +1913,7 @@ class PDFService(PDFLayoutAnalyzer):
         min_font_size: float = 5.0,
     ) -> bool:
         leading_ideographic_spaces = "\u3000" * (len(text) - len(text.lstrip("\u3000")))
-        clean_text = normalize_pdf_text(text)
+        clean_text = self._sanitize_text_for_render_font(text)
         if leading_ideographic_spaces and clean_text:
             clean_text = f"{leading_ideographic_spaces}{clean_text}"
         if not clean_text or rect.width <= 0 or rect.height <= 0:
@@ -2061,6 +2238,12 @@ class PDFService(PDFLayoutAnalyzer):
             regular_measure_font,
             bold_measure_font,
         )
+        self._copy_source_block_regions(
+            new_page,
+            src_page,
+            self._get_preserved_attribution_metadata_blocks(page_data),
+            page_width,
+        )
         _pdf_perf_log(
             "bilingual_page_rendered",
             page=page_data.get("pageNum"),
@@ -2124,6 +2307,62 @@ class PDFService(PDFLayoutAnalyzer):
             and self.is_translatable_text_block(block)
         ]
         return self._merge_text_blocks(text_blocks)
+
+    def _get_preserved_attribution_metadata_blocks(self, page_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if int(page_data.get("pageNum") or 0) != 1:
+            return []
+        return [
+            block for block in page_data.get("textBlocks", [])
+            if block.get("type") == "text"
+            and block.get("is_attribution_metadata")
+        ]
+
+    def _copy_source_block_regions(
+        self,
+        target_page,
+        source_page,
+        blocks: List[Dict[str, Any]],
+        x_offset: float,
+    ) -> None:
+        source_rects: List[fitz.Rect] = []
+        for block in blocks:
+            bbox = block.get("bbox", {})
+            try:
+                source_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+            except Exception:
+                continue
+            if source_rect.is_empty:
+                continue
+            source_rects.append(source_rect)
+
+        if not source_rects:
+            return
+
+        clip_rect = fitz.Rect(source_rects[0])
+        for source_rect in source_rects[1:]:
+            clip_rect |= source_rect
+        clip_rect.x0 = max(source_page.rect.x0, clip_rect.x0 - 14)
+        clip_rect.y0 = max(source_page.rect.y0, clip_rect.y0 - 8)
+        clip_rect.x1 = min(source_page.rect.x1, clip_rect.x1 + 14)
+        clip_rect.y1 = min(source_page.rect.y1, clip_rect.y1 + 8)
+        if clip_rect.is_empty:
+            return
+
+        dest_rect = fitz.Rect(
+            x_offset + clip_rect.x0,
+            clip_rect.y0,
+            x_offset + clip_rect.x1,
+            clip_rect.y1,
+        )
+        try:
+            pixmap = source_page.get_pixmap(
+                matrix=fitz.Matrix(3, 3),
+                clip=clip_rect,
+                alpha=True,
+            )
+            target_page.insert_image(dest_rect, stream=pixmap.tobytes("png"))
+        except Exception as e:
+            print(f"[DEBUG] Failed to copy preserved source block: {str(e)}")
 
     def _render_translated_text_blocks(
         self,
@@ -2279,6 +2518,17 @@ class PDFService(PDFLayoutAnalyzer):
             if target_rect.width < base_font_size * 2:
                 target_rect.x1 = min(target_right_edge - 24, target_rect.x0 + base_font_size * 4)
 
+            leading_preserved_visual_rects = self._leading_preserved_visual_rects(
+                block,
+                source_rect,
+                base_font_size,
+            )
+            if leading_preserved_visual_rects and not marker:
+                preserved_right = max(rect.x1 for rect in leading_preserved_visual_rects)
+                adjusted_x0 = x_offset + preserved_right + max(base_font_size * 0.25, 3.0)
+                if adjusted_x0 <= target_rect.x1 - max(base_font_size * 3.0, 24.0):
+                    target_rect.x0 = max(target_rect.x0, adjusted_x0)
+
             inline_graphic_anchors = []
             if (
                 not marker
@@ -2314,6 +2564,15 @@ class PDFService(PDFLayoutAnalyzer):
             text_rect = target_rect
             if marker:
                 copied_marker_width = 0.0
+                marker_copy_max_source_x = None
+                preserved_marker_width = 0.0
+                if leading_preserved_visual_rects:
+                    first_preserved_left = min(rect.x0 for rect in leading_preserved_visual_rects)
+                    marker_copy_max_source_x = first_preserved_left - max(base_font_size * 0.12, 1.0)
+                    preserved_marker_width = max(
+                        max(rect.x1 - source_rect.x0, 0.0)
+                        for rect in leading_preserved_visual_rects
+                    )
                 source_doc = getattr(src_page, "parent", None)
                 source_page_number = getattr(src_page, "number", None)
                 if source_doc is not None and source_page_number is not None:
@@ -2324,9 +2583,12 @@ class PDFService(PDFLayoutAnalyzer):
                         source_rect,
                         target_rect,
                         base_font_size,
+                        max_source_x=marker_copy_max_source_x,
                     )
+                marker_gap = max(base_font_size * 0.25, 2.0)
                 marker_width = max(
-                    copied_marker_width + max(base_font_size * 0.25, 2.0),
+                    copied_marker_width + marker_gap,
+                    preserved_marker_width + marker_gap,
                     base_font_size * 1.35,
                 )
                 text_rect = fitz.Rect(
@@ -2504,6 +2766,12 @@ class PDFService(PDFLayoutAnalyzer):
             bold_font_name,
             regular_measure_font,
             bold_measure_font,
+        )
+        self._copy_source_block_regions(
+            new_page,
+            src_page,
+            self._get_preserved_attribution_metadata_blocks(page_data),
+            0,
         )
         _pdf_perf_log(
             "translated_page_rendered",
