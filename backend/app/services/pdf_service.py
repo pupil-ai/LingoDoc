@@ -1588,6 +1588,100 @@ class PDFService(PDFLayoutAnalyzer):
 
         return False
 
+    def _translated_textbox_required_height(
+        self,
+        text: str,
+        rect: fitz.Rect,
+        font_name: str,
+        font_size: float,
+        line_height: float,
+        measure_font=None,
+        first_line_indent: float = 0.0,
+    ) -> float:
+        leading_ideographic_spaces = "\u3000" * (len(text or "") - len((text or "").lstrip("\u3000")))
+        clean_text = normalize_pdf_text(text)
+        if leading_ideographic_spaces and clean_text:
+            clean_text = f"{leading_ideographic_spaces}{clean_text}"
+        if not clean_text or rect.width <= 0 or rect.height <= 0 or font_size <= 0:
+            return 0.0
+
+        first_line_indent = max(float(first_line_indent or 0.0), 0.0)
+        first_line_indent = min(first_line_indent, max(rect.width - font_size * 2.0, 0.0))
+        lines = self._wrap_text_for_rect(
+            clean_text,
+            rect.width,
+            font_size,
+            measure_font=measure_font,
+            font_name=font_name,
+            preserve_leading_space=bool(leading_ideographic_spaces),
+            first_line_width=(rect.width - first_line_indent) if first_line_indent > 0 else None,
+        )
+        if not lines:
+            return 0.0
+        return font_size + max(len(lines) - 1, 0) * font_size * line_height
+
+    def _translated_text_fits_rect(
+        self,
+        text: str,
+        rect: fitz.Rect,
+        font_name: str,
+        font_size: float,
+        line_height: float,
+        measure_font=None,
+        first_line_indent: float = 0.0,
+    ) -> bool:
+        required_height = self._translated_textbox_required_height(
+            text,
+            rect,
+            font_name,
+            font_size,
+            line_height,
+            measure_font=measure_font,
+            first_line_indent=first_line_indent,
+        )
+        return required_height > 0 and required_height <= rect.height
+
+    def _find_textbox_fit_scale(
+        self,
+        text: str,
+        rect: fitz.Rect,
+        font_name: str,
+        font_size: float,
+        line_height: float,
+        measure_font=None,
+        first_line_indent: float = 0.0,
+    ) -> float:
+        if rect.width <= 0 or rect.height <= 0 or font_size <= 0 or not normalize_pdf_text(text):
+            return 1.0
+        if self._translated_text_fits_rect(
+            text,
+            rect,
+            font_name,
+            font_size,
+            line_height,
+            measure_font=measure_font,
+            first_line_indent=first_line_indent,
+        ):
+            return 1.0
+
+        low = 0.05
+        high = 1.0
+        for _ in range(10):
+            midpoint = (low + high) / 2
+            if self._translated_text_fits_rect(
+                text,
+                rect,
+                font_name,
+                font_size * midpoint,
+                line_height,
+                measure_font=measure_font,
+                first_line_indent=first_line_indent * midpoint,
+            ):
+                low = midpoint
+            else:
+                high = midpoint
+        return low
+
     def _insert_rotated_fitted_textbox(
         self,
         page,
@@ -1676,6 +1770,138 @@ class PDFService(PDFLayoutAnalyzer):
             elapsed_ms=_elapsed_ms(started_at),
         )
         return regular_font_name, bold_font_name, regular_measure_font, bold_measure_font
+
+    def _is_main_body_translation_block(self, block: Dict[str, Any]) -> bool:
+        return block.get("layout_role", "body") == "body"
+
+    def _line_height_for_translated_text(self, text: str, layout_role: str) -> float:
+        line_height = 1.42 if has_cjk(text) and len(text) > 80 else 1.36 if has_cjk(text) else 1.2
+        if layout_role == "marginalia":
+            line_height = min(line_height, 1.16)
+        return line_height
+
+    def _main_body_text_rect_for_scale(
+        self,
+        block: Dict[str, Any],
+        source_rect: fitz.Rect,
+        original_rect: fitz.Rect,
+        x_offset: float,
+        target_right_edge: float,
+        base_font_size: float,
+        source_line_count: int,
+        source_text: str,
+        marker: str,
+        first_line_indent: float,
+    ) -> fitz.Rect:
+        use_label_start_x = (
+            not marker
+            and source_line_count <= 2
+            and len(source_text) <= 90
+        )
+        translation_start_x = (
+            source_rect.x0
+            if marker or not use_label_start_x
+            else self._translation_start_x(block, source_rect, base_font_size)
+        )
+        target_rect = fitz.Rect(
+            x_offset + translation_start_x,
+            max(0, source_rect.y0 - 1),
+            min(target_right_edge - 24, x_offset + source_rect.x1 + 2),
+            min(original_rect.height - 12, source_rect.y1 + 1),
+        )
+        if target_rect.width < base_font_size * 2:
+            target_rect.x1 = min(target_right_edge - 24, target_rect.x0 + base_font_size * 4)
+
+        if marker:
+            marker_width = base_font_size * 1.6
+            target_rect = fitz.Rect(
+                min(target_rect.x1, target_rect.x0 + marker_width),
+                target_rect.y0,
+                target_rect.x1,
+                target_rect.y1,
+            )
+        return target_rect
+
+    def _calculate_main_body_page_scale(
+        self,
+        text_blocks: List[Dict[str, Any]],
+        src_page,
+        original_rect: fitz.Rect,
+        x_offset: float,
+        target_right_edge: float,
+        regular_font_name: str,
+        bold_font_name: str,
+        regular_measure_font,
+        bold_measure_font,
+    ) -> float:
+        scale = 1.0
+        measured_blocks = 0
+
+        for block in text_blocks:
+            if not self._is_main_body_translation_block(block):
+                continue
+
+            bbox = block.get("bbox", {})
+            try:
+                source_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+            except Exception:
+                continue
+            if source_rect.is_empty or source_rect.width <= 0 or source_rect.height <= 0:
+                continue
+
+            source_line_count = len([
+                line for line in block.get("lines", [])
+                if normalize_pdf_text(line.get("text", ""))
+            ])
+            translated_text = normalize_pdf_text(block.get("translatedText", ""))
+            source_text = normalize_pdf_text(block.get("text", ""))
+            marker, content_text = self._split_leading_marker(translated_text, source_text)
+            if not content_text:
+                content_text = translated_text
+            if not content_text:
+                continue
+            source_compact_len = len(re.sub(r"\s+", "", source_text))
+            content_compact_len = len(re.sub(r"\s+", "", content_text))
+            if source_compact_len > 0 and content_compact_len <= source_compact_len * 1.04:
+                continue
+
+            style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
+            text_font_name = bold_font_name if style["is_bold"] else regular_font_name
+            text_measure_font = bold_measure_font if style["is_bold"] else regular_measure_font
+            base_font_size = float(block.get("font_size") or style["font_size"])
+            if has_cjk(content_text):
+                base_font_size *= 0.86
+            if marker:
+                base_font_size = max(base_font_size, style["font_size"] * 0.9)
+            base_font_size = max(min(base_font_size, source_rect.height * 0.95), 0.5)
+            first_line_indent = self._source_first_line_indent(block, source_rect, base_font_size)
+            text_rect = self._main_body_text_rect_for_scale(
+                block,
+                source_rect,
+                original_rect,
+                x_offset,
+                target_right_edge,
+                base_font_size,
+                source_line_count,
+                source_text,
+                marker,
+                first_line_indent,
+            )
+            block_scale = self._find_textbox_fit_scale(
+                content_text,
+                text_rect,
+                text_font_name,
+                base_font_size,
+                self._line_height_for_translated_text(content_text, "body"),
+                measure_font=text_measure_font,
+                first_line_indent=first_line_indent,
+            )
+            scale = min(scale, block_scale)
+            measured_blocks += 1
+
+        if measured_blocks <= 0:
+            return 1.0
+        return max(min(scale, 1.0), 0.05)
 
     def _add_bilingual_page(
         self,
@@ -1824,6 +2050,17 @@ class PDFService(PDFLayoutAnalyzer):
             block.get("layout_column") not in (None, -1)
             for block in text_blocks
         )
+        main_body_page_scale = self._calculate_main_body_page_scale(
+            text_blocks,
+            src_page,
+            original_rect,
+            x_offset,
+            target_right_edge,
+            regular_font_name,
+            bold_font_name,
+            regular_measure_font,
+            bold_measure_font,
+        )
         rendered_count = 0
         failed_count = 0
         fallback_count = 0
@@ -1850,6 +2087,7 @@ class PDFService(PDFLayoutAnalyzer):
             if not content_text:
                 content_text = translated_text
 
+            is_main_body_block = self._is_main_body_translation_block(block)
             style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
             text_font_name = bold_font_name if style["is_bold"] else regular_font_name
             text_measure_font = bold_measure_font if style["is_bold"] else regular_measure_font
@@ -1858,7 +2096,8 @@ class PDFService(PDFLayoutAnalyzer):
                 base_font_size *= 0.86
             if marker:
                 base_font_size = max(base_font_size, style["font_size"] * 0.9)
-            base_font_size = max(min(base_font_size, source_rect.height * 0.95), 5.5)
+            base_font_size *= main_body_page_scale if is_main_body_block else 1.0
+            base_font_size = max(min(base_font_size, source_rect.height * 0.95), 0.5 if is_main_body_block else 5.5)
             layout_role = block.get("layout_role", "body")
             first_line_indent = 0.0
             if layout_role == "body" and not marker:
@@ -1883,18 +2122,21 @@ class PDFService(PDFLayoutAnalyzer):
             source_height = max(source_rect.height, min_height)
             text_length_ratio = len(content_text) / max(len(source_text), 1)
             expansion_factor = 1.0
-            if has_cjk(content_text) and layout_role == "body":
+            if has_cjk(content_text) and layout_role == "body" and not is_main_body_block:
                 expansion_factor = 1.22 if text_length_ratio > 0.85 else 1.12
                 if len(content_text) > 180:
                     expansion_factor += 0.12
-            target_bottom = min(
-                original_rect.height - 12,
-                max(
-                    min(bottom_limit, source_rect.y0 + source_height * expansion_factor),
-                    source_rect.y1 + 2,
-                    source_rect.y0 + min_height,
-                ),
-            )
+            if is_main_body_block:
+                target_bottom = min(original_rect.height - 12, source_rect.y1 + 1)
+            else:
+                target_bottom = min(
+                    original_rect.height - 12,
+                    max(
+                        min(bottom_limit, source_rect.y0 + source_height * expansion_factor),
+                        source_rect.y1 + 2,
+                        source_rect.y0 + min_height,
+                    ),
+                )
             use_label_start_x = (
                 not marker
                 and source_line_count <= 2
@@ -2002,9 +2244,7 @@ class PDFService(PDFLayoutAnalyzer):
                     rendered_count += 1
                     continue
 
-                line_height = 1.42 if has_cjk(content_text) and len(content_text) > 80 else 1.36 if has_cjk(content_text) else 1.2
-                if layout_role == "marginalia":
-                    line_height = min(line_height, 1.16)
+                line_height = self._line_height_for_translated_text(content_text, layout_role)
                 text_align = fitz.TEXT_ALIGN_LEFT if marker else style["align"]
                 vertical_align = (
                     "middle"
@@ -2016,7 +2256,11 @@ class PDFService(PDFLayoutAnalyzer):
                     )
                     else "top"
                 )
-                min_readable_size = max(6.5, base_font_size * (0.70 if len(content_text) > 140 else 0.76))
+                min_readable_size = (
+                    0.5
+                    if is_main_body_block
+                    else max(6.5, base_font_size * (0.70 if len(content_text) > 140 else 0.76))
+                )
                 if layout_role == "marginalia":
                     min_readable_size = max(5.2, base_font_size * 0.58)
                 success = self._insert_fitted_textbox(
@@ -2031,7 +2275,7 @@ class PDFService(PDFLayoutAnalyzer):
                     line_height=line_height,
                     measure_font=text_measure_font,
                     vertical_align=vertical_align,
-                    force_manual_wrap=has_cjk(content_text),
+                    force_manual_wrap=is_main_body_block or has_cjk(content_text),
                     first_line_indent=first_line_indent,
                 )
                 if not success:
@@ -2053,7 +2297,7 @@ class PDFService(PDFLayoutAnalyzer):
                         text_rect.x0,
                         text_rect.y0,
                         fallback_right_edge,
-                        min(original_rect.height - 12, max(text_rect.y1, bottom_limit)),
+                        text_rect.y1 if is_main_body_block else min(original_rect.height - 12, max(text_rect.y1, bottom_limit)),
                     )
                     self._insert_fitted_textbox(
                         target_page,
@@ -2063,11 +2307,11 @@ class PDFService(PDFLayoutAnalyzer):
                         base_font_size * 0.9,
                         style["color"],
                         align=text_align,
-                        min_font_size=max(5.8, base_font_size * 0.62),
+                        min_font_size=0.5 if is_main_body_block else max(5.8, base_font_size * 0.62),
                         line_height=line_height,
                         measure_font=text_measure_font,
                         vertical_align=vertical_align,
-                        force_manual_wrap=has_cjk(content_text),
+                        force_manual_wrap=is_main_body_block or has_cjk(content_text),
                         first_line_indent=first_line_indent,
                     )
                 rendered_count += 1
