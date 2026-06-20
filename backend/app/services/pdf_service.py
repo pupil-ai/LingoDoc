@@ -18,6 +18,7 @@ from app.services.pdf_layout_utils import (
 from app.services.pdf_text_utils import (
     CJK_PUNCTUATION,
     MARKER_GLYPHS,
+    SENTENCE_ENDINGS,
     has_cjk,
     is_symbol_emoji,
     is_symbol_emoji_text,
@@ -1813,8 +1814,59 @@ class PDFService(PDFLayoutAnalyzer):
         )
         return regular_font_name, bold_font_name, regular_measure_font, bold_measure_font
 
+    def _block_visible_line_count(self, block: Dict[str, Any]) -> int:
+        return len([
+            line for line in block.get("lines", [])
+            if normalize_pdf_text(line.get("text", ""))
+        ])
+
+    def _block_contains_symbol_emoji(self, block: Dict[str, Any]) -> bool:
+        source_text = normalize_pdf_text(block.get("text", ""))
+        if any(
+            char not in {"\ufe0f", "\u200d"} and is_symbol_emoji(char)
+            for char in source_text
+        ):
+            return True
+
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                span_text = normalize_pdf_text(span.get("text", ""))
+                if any(
+                    char not in {"\ufe0f", "\u200d"} and is_symbol_emoji(char)
+                    for char in span_text
+                ):
+                    return True
+        return False
+
+    def _is_compact_heading_translation_block(self, block: Dict[str, Any]) -> bool:
+        if block.get("layout_role", "body") != "body":
+            return False
+
+        source_text = normalize_pdf_text(block.get("text", ""))
+        if not source_text:
+            return False
+
+        line_count = self._block_visible_line_count(block)
+        font_size = float(block.get("font_size") or 0)
+        compact_len = len(re.sub(r"\s+", "", source_text))
+        if line_count > 2 or font_size < 14 or compact_len > 90:
+            return False
+
+        if self._block_contains_symbol_emoji(block):
+            return True
+
+        word_count = len(re.findall(r"[\w\u4e00-\u9fff]+", source_text, flags=re.UNICODE))
+        return (
+            font_size >= 16
+            and word_count <= 10
+            and not source_text.rstrip().endswith(SENTENCE_ENDINGS)
+        )
+
     def _is_main_body_translation_block(self, block: Dict[str, Any]) -> bool:
-        return block.get("layout_role", "body") == "body"
+        return (
+            block.get("layout_role", "body") == "body"
+            and not self._is_compact_heading_translation_block(block)
+        )
 
     def _line_height_for_translated_text(self, text: str, layout_role: str) -> float:
         line_height = 1.42 if has_cjk(text) and len(text) > 80 else 1.36 if has_cjk(text) else 1.2
@@ -2130,6 +2182,7 @@ class PDFService(PDFLayoutAnalyzer):
                 content_text = translated_text
 
             is_main_body_block = self._is_main_body_translation_block(block)
+            is_compact_heading_block = self._is_compact_heading_translation_block(block)
             style = self._get_block_style(src_page, source_rect, block.get("font_size") or 10, block)
             text_font_name = bold_font_name if style["is_bold"] else regular_font_name
             text_measure_font = bold_measure_font if style["is_bold"] else regular_measure_font
@@ -2196,11 +2249,43 @@ class PDFService(PDFLayoutAnalyzer):
                 min(target_right_edge - 24, x_offset + source_rect.x1 + 2),
                 min(original_rect.height - 12, target_bottom),
             )
+            if is_compact_heading_block:
+                try:
+                    measured_heading_width = self._measure_text_width(
+                        content_text,
+                        base_font_size,
+                        text_measure_font,
+                        text_font_name,
+                    )
+                except Exception:
+                    measured_heading_width = 0.0
+                heading_width_cap = original_rect.width * (
+                    0.42
+                    if page_has_columns or block.get("layout_column") not in (None, -1)
+                    else 0.72
+                )
+                heading_width = min(
+                    max(
+                        source_rect.width * 2.2,
+                        base_font_size * 8.0,
+                        measured_heading_width * 1.08,
+                    ),
+                    heading_width_cap,
+                )
+                target_rect.x1 = min(
+                    target_right_edge - 24,
+                    max(target_rect.x1, target_rect.x0 + heading_width),
+                )
             if target_rect.width < base_font_size * 2:
                 target_rect.x1 = min(target_right_edge - 24, target_rect.x0 + base_font_size * 4)
 
             inline_graphic_anchors = []
-            if not marker and source_line_count <= 2 and len(source_text) <= 180:
+            if (
+                not marker
+                and source_line_count <= 2
+                and len(source_text) <= 180
+                and not self._block_contains_symbol_emoji(block)
+            ):
                 inline_graphic_anchors = self._find_inline_graphic_anchors(
                     src_page,
                     block,
