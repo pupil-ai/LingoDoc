@@ -161,6 +161,7 @@ class PDFService(PDFLayoutAnalyzer):
         # character gaps. Some PDFs encode spaces as horizontal offsets.
         text_info = page.get_text("rawdict")
         graphic_regions = self._collect_graphic_regions(page, text_info)
+        table_rule_regions = self._collect_table_rule_regions(page)
         
         for block in text_info.get("blocks", []):
             block_lines = []
@@ -237,6 +238,7 @@ class PDFService(PDFLayoutAnalyzer):
         self._refine_dense_reference_flags(text_blocks, page_rect)
         self._refine_header_footer_metadata_flags(text_blocks)
         self._mark_chart_text_blocks(text_blocks, page_rect, graphic_regions)
+        self._mark_table_text_blocks(text_blocks, page_rect, table_rule_regions)
         
         doc.close()
         return text_blocks

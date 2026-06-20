@@ -163,7 +163,12 @@ def _looks_numeric_or_formula_like(text: str) -> bool:
 def _block_is_expected_to_translate(block: Dict[str, Any]) -> bool:
     if block.get("type") != "text":
         return False
-    if block.get("is_header_footer_metadata") or block.get("is_formula") or block.get("is_chart_text"):
+    if (
+        block.get("is_header_footer_metadata")
+        or block.get("is_formula")
+        or block.get("is_chart_text")
+        or block.get("is_table_text")
+    ):
         return False
     if block.get("layout_role") in {"metadata", "dense_reference", "vertical_text"}:
         return False

@@ -515,6 +515,8 @@ class PDFLayoutAnalyzer:
             return False
         if block.get("is_chart_text"):
             return False
+        if block.get("is_table_text"):
+            return False
         if block.get("layout_role") in {"metadata", "dense_reference", "vertical_text"}:
             return False
         if block.get("is_header_footer_metadata"):
@@ -593,6 +595,102 @@ class PDFLayoutAnalyzer:
             regions.append(draw_rect)
 
         return self._merge_overlapping_regions(regions, gap=6.0)
+
+    def _collect_table_rule_regions(self, page) -> List[fitz.Rect]:
+        page_rect = page.rect
+        page_width = max(float(page_rect.width), 1.0)
+        page_height = max(float(page_rect.height), 1.0)
+        horizontal_segments: List[fitz.Rect] = []
+
+        for drawing in page.get_drawings():
+            rect = drawing.get("rect")
+            if not rect:
+                continue
+            draw_rect = fitz.Rect(rect)
+            if draw_rect.is_empty:
+                continue
+
+            width = float(draw_rect.width)
+            height = float(draw_rect.height)
+            if width >= max(page_width * 0.10, 42.0) and height <= 2.2:
+                horizontal_segments.append(draw_rect)
+
+        if not horizontal_segments:
+            return []
+
+        row_bands: List[Dict[str, Any]] = []
+        for segment in sorted(horizontal_segments, key=lambda rect: (rect.y0 + rect.y1) / 2):
+            center_y = (segment.y0 + segment.y1) / 2
+            for band in row_bands:
+                if abs(center_y - band["center_y"]) <= 1.8:
+                    band["segments"].append(segment)
+                    band["center_y"] = sum((rect.y0 + rect.y1) / 2 for rect in band["segments"]) / len(band["segments"])
+                    break
+            else:
+                row_bands.append({"center_y": center_y, "segments": [segment]})
+
+        rule_rows: List[fitz.Rect] = []
+        for band in row_bands:
+            segments = sorted(band["segments"], key=lambda rect: rect.x0)
+            merged_segments: List[fitz.Rect] = []
+            for segment in segments:
+                if not merged_segments:
+                    merged_segments.append(fitz.Rect(segment))
+                    continue
+                previous = merged_segments[-1]
+                if segment.x0 <= previous.x1 + 16.0:
+                    merged_segments[-1] = previous | segment
+                else:
+                    merged_segments.append(fitz.Rect(segment))
+
+            longest = max(merged_segments, key=lambda rect: rect.width)
+            row_span = fitz.Rect(merged_segments[0])
+            for segment in merged_segments[1:]:
+                row_span |= segment
+            if longest.width >= page_width * 0.34 or (len(merged_segments) >= 3 and row_span.width >= page_width * 0.42):
+                rule_rows.append(row_span)
+
+        table_regions: List[fitz.Rect] = []
+        used = [False] * len(rule_rows)
+        for index, row in enumerate(rule_rows):
+            if used[index]:
+                continue
+            cluster = [index]
+            used[index] = True
+            changed = True
+            while changed:
+                changed = False
+                cluster_rect = fitz.Rect(rule_rows[cluster[0]])
+                for cluster_index in cluster[1:]:
+                    cluster_rect |= rule_rows[cluster_index]
+
+                for other_index, other in enumerate(rule_rows):
+                    if used[other_index]:
+                        continue
+                    horizontal_overlap = min(cluster_rect.x1, other.x1) - max(cluster_rect.x0, other.x0)
+                    min_width = max(min(cluster_rect.width, other.width), 1.0)
+                    vertical_gap = max(other.y0 - cluster_rect.y1, cluster_rect.y0 - other.y1, 0.0)
+                    if horizontal_overlap >= min_width * 0.55 and vertical_gap <= page_height * 0.34:
+                        cluster.append(other_index)
+                        used[other_index] = True
+                        changed = True
+
+            if len(cluster) < 3:
+                continue
+            region = fitz.Rect(rule_rows[cluster[0]])
+            for cluster_index in cluster[1:]:
+                region |= rule_rows[cluster_index]
+            if region.width < page_width * 0.40 or region.height < 20.0:
+                continue
+            region = fitz.Rect(
+                max(page_rect.x0, region.x0 - 4.0),
+                max(page_rect.y0, region.y0 - 18.0),
+                min(page_rect.x1, region.x1 + 4.0),
+                min(page_rect.y1, region.y1 + 26.0),
+            )
+            table_regions.append(region)
+
+        return self._merge_overlapping_regions(table_regions, gap=10.0)
 
     def _merge_overlapping_regions(self, regions: List[fitz.Rect], gap: float = 0.0) -> List[fitz.Rect]:
         merged_regions: List[fitz.Rect] = []
@@ -820,6 +918,122 @@ class PDFLayoutAnalyzer:
                         seed_indexes.append(index)
                         changed = True
                         break
+
+    def _line_table_alignment_regions(
+        self,
+        text_blocks: List[Dict[str, Any]],
+        page_rect: fitz.Rect,
+    ) -> List[fitz.Rect]:
+        records: List[Dict[str, Any]] = []
+        page_width = max(float(page_rect.width), 1.0)
+
+        for index, block in enumerate(text_blocks):
+            if (
+                block.get("type") != "text"
+                or block.get("is_formula")
+                or block.get("is_chart_text")
+                or block.get("is_header_footer_metadata")
+                or block.get("layout_role") in {"metadata", "dense_reference", "vertical_text"}
+            ):
+                continue
+
+            for line in block.get("lines", []):
+                text = normalize_pdf_text(line.get("text", ""))
+                if not text or len(text) > 92:
+                    continue
+                rect = line_rect(line)
+                if rect.is_empty:
+                    continue
+                font_size = float(line.get("font_size") or block.get("font_size") or 0)
+                if font_size > 10.8:
+                    continue
+                records.append({
+                    "index": index,
+                    "rect": rect,
+                    "text": text,
+                    "font_size": font_size,
+                })
+
+        if len(records) < 12:
+            return []
+
+        row_groups: List[List[Dict[str, Any]]] = []
+        for record in sorted(records, key=lambda item: (item["rect"].y0 + item["rect"].y1) / 2):
+            center_y = (record["rect"].y0 + record["rect"].y1) / 2
+            for row in row_groups:
+                row_center = sum((item["rect"].y0 + item["rect"].y1) / 2 for item in row) / len(row)
+                if abs(center_y - row_center) <= max(3.0, record["font_size"] * 0.45):
+                    row.append(record)
+                    break
+            else:
+                row_groups.append([record])
+
+        structured_rows = [
+            sorted(row, key=lambda item: item["rect"].x0)
+            for row in row_groups
+            if len({item["index"] for item in row}) >= 3
+        ]
+        if len(structured_rows) < 4:
+            return []
+
+        column_positions: List[float] = []
+        for row in structured_rows:
+            for item in row:
+                x0 = item["rect"].x0
+                for column_index, column_x in enumerate(column_positions):
+                    if abs(x0 - column_x) <= max(7.0, item["font_size"] * 1.1):
+                        column_positions[column_index] = (column_x + x0) / 2
+                        break
+                else:
+                    column_positions.append(x0)
+
+        if len(column_positions) < 3:
+            return []
+
+        table_indexes = sorted({item["index"] for row in structured_rows for item in row})
+        region = block_rect(text_blocks[table_indexes[0]])
+        for index in table_indexes[1:]:
+            region |= block_rect(text_blocks[index])
+
+        if region.width < page_width * 0.36 or region.height < 24.0:
+            return []
+
+        return [fitz.Rect(
+            max(page_rect.x0, region.x0 - 6.0),
+            max(page_rect.y0, region.y0 - 8.0),
+            min(page_rect.x1, region.x1 + 6.0),
+            min(page_rect.y1, region.y1 + 10.0),
+        )]
+
+    def _mark_table_text_blocks(
+        self,
+        text_blocks: List[Dict[str, Any]],
+        page_rect: fitz.Rect,
+        table_rule_regions: List[fitz.Rect],
+    ) -> None:
+        for block in text_blocks:
+            block["is_table_text"] = False
+
+        table_regions = list(table_rule_regions or [])
+        table_regions.extend(self._line_table_alignment_regions(text_blocks, page_rect))
+        if not table_regions:
+            return
+
+        table_regions = self._merge_overlapping_regions(table_regions, gap=8.0)
+        for block in text_blocks:
+            if block.get("type") != "text" or block.get("is_header_footer_metadata"):
+                continue
+            rect = block_rect(block)
+            if rect.is_empty:
+                continue
+            for region in table_regions:
+                if not region.intersects(rect):
+                    continue
+                overlap = rect & region
+                overlap_ratio = overlap.get_area() / max(rect.get_area(), 1.0)
+                if overlap_ratio >= 0.35 or region.contains(rect.tl) or region.contains(rect.br):
+                    block["is_table_text"] = True
+                    break
 
     def _is_marker_prefix_char(self, char: str) -> bool:
         if not char:
