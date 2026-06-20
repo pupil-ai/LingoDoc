@@ -661,25 +661,12 @@ async def _translate_structured_batch(
     return await translator.translate_structured_batch(items, source_lang, target_lang)
 
 
-UNSUPPORTED_TRANSLATION_SCRIPT_RE = re.compile(r"[\u0900-\u097F]+")
-
-
-def _strip_unsupported_target_scripts(text: str, _target_lang: Optional[str]) -> str:
-    # Current supported targets do not use this script range; drop occasional
-    # model leakage before it can render as .notdef boxes.
-    text = UNSUPPORTED_TRANSLATION_SCRIPT_RE.sub("", text)
-    text = re.sub(r"[ \t]{2,}", " ", text)
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    return text.strip()
-
-
 def _normalize_translated_block_text(
     translated_text: str,
     source_text: str,
     target_lang: Optional[str] = None,
 ) -> str:
     normalized = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", translated_text).strip()
-    normalized = _strip_unsupported_target_scripts(normalized, target_lang)
     normalized = _restore_reference_markers(normalized, source_text)
     marker = _leading_layout_marker(source_text)
     if marker and normalized and not normalized.startswith(marker):
