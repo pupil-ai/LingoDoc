@@ -7,6 +7,8 @@ import sys
 
 import aiohttp
 
+from app.services.translation_text_utils import sanitize_translated_text
+
 
 SUPPORTED_LANGUAGE_CODES = [
     "en",
@@ -121,7 +123,8 @@ def _build_translation_messages(payload: str, source_lang: str, target_lang: str
                 f"4. Preserve layout markers such as line breaks, bullets, numbering, emoji, and leading symbols.\n"
                 f"5. Do not add explanations, notes, glosses, or parenthetical original terms unless they already exist in the source text.\n"
                 f"6. Do not add new line breaks inside a paragraph; preserve only the source paragraph breaks.\n"
-                f"7. Return only the translated text unless the user explicitly asks for JSON."
+                f"7. Use ordinary Unicode letters and punctuation only. Never output replacement characters, private-use glyphs, or unreadable square/tofu placeholders.\n"
+                f"8. Return only the translated text unless the user explicitly asks for JSON."
             ),
         },
         {"role": "user", "content": payload},
@@ -135,13 +138,13 @@ def _extract_json_array(raw_response: str) -> Any:
         text = fenced_match.group(1).strip()
 
     try:
-        return json.loads(text)
+        return json.loads(text, strict=False)
     except json.JSONDecodeError:
         start = text.find("[")
         end = text.rfind("]")
         if start == -1 or end == -1 or end <= start:
             raise
-        return json.loads(text[start:end + 1])
+        return json.loads(text[start:end + 1], strict=False)
 
 
 def _build_structured_batch_payload(items: List[Dict[str, Any]]) -> str:
@@ -175,6 +178,7 @@ def _build_structured_batch_messages(
             "Preserve leadingMarker exactly at the start of translatedText when it is non-empty.\n"
             "Preserve placeholder tokens like [[REF0]] exactly; do not translate, remove, reorder, or alter them.\n"
             "Preserve numeric expressions, comparison operators, percentages, ranges, bullets, numbering, citations, figure/table labels, and symbols exactly in meaning and local order.\n"
+            "Use ordinary Unicode letters and punctuation only; never output replacement characters, private-use glyphs, or unreadable square/tofu placeholders.\n"
             "Do not add explanations, notes, glosses, markdown, or extra line breaks.\n"
             f"Input JSON:\n{payload}"
         ),
@@ -199,7 +203,7 @@ def _parse_batch_translations(raw_response: str, expected_count: int) -> List[st
         item_id = item.get("id")
         translated_text = item.get("translatedText")
         if isinstance(item_id, int) and isinstance(translated_text, str):
-            translations_by_id[item_id] = translated_text.strip()
+            translations_by_id[item_id] = sanitize_translated_text(translated_text)
 
     if len(translations_by_id) != expected_count:
         raise Exception("Batch translation response is missing items")

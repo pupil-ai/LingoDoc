@@ -1,13 +1,108 @@
 import re
-from typing import Any, Dict, List, Optional
+import unicodedata
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+from app.services.translation_text_utils import count_suspicious_translation_glyphs
 
-SUSPICIOUS_GLYPHS = {"\ufffd", "\u25a1", "\u25a0", "\u25cc", "\u25fb", "\u25fc"}
 SENTENCE_ENDINGS = (".", "!", "?", ";", ":", "\u3002", "\uff01", "\uff1f", "\uff1b", "\uff1a")
 
 
 def _normalize_token(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
+
+
+def _normalize_numeric_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text or "")
+    normalized = normalized.replace("\u2264", "<=").replace("\u2265", ">=")
+    normalized = normalized.replace("\u2212", "-")
+    normalized = re.sub(r"[\u2010-\u2015]", "-", normalized)
+    return normalized
+
+
+def _normalize_numeric_token(text: str) -> str:
+    token = _normalize_token(_normalize_numeric_text(text))
+    token = re.sub(r"(?<=\d),(?=\d)", ".", token)
+    return token
+
+
+def _normalize_number_value(value: str) -> str:
+    value = _normalize_numeric_text(value)
+    value = re.sub(r"(?<=\d)[\s\u00a0\u202f](?=\d)", "", value)
+    value = re.sub(r"[^\d.,]", "", value)
+    if not value:
+        return ""
+
+    separators = re.findall(r"[.,]", value)
+    if not separators:
+        return value
+
+    parts = re.split(r"[.,]", value)
+    if len(separators) > 1:
+        if all(len(part) == 3 for part in parts[1:]):
+            return "".join(parts)
+        integer_part = "".join(parts[:-1])
+        return f"{integer_part}.{parts[-1]}"
+
+    before, after = parts[0], parts[1]
+    if len(after) == 3 and before and before != "0":
+        return before + after
+    return f"{before}.{after}"
+
+
+def _numeric_match_keys(text: str) -> Set[str]:
+    normalized = _normalize_numeric_text(text)
+    keys = {_normalize_numeric_token(normalized)}
+    number = r"\d+(?:[\s\u00a0\u202f]?\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)*"
+    patterns = [
+        rf"(?P<cmp><=|>=|[<>])?\s*(?P<num>{number})\s*(?P<pct>%)?",
+        rf"(?P<cmp><=|>=|[<>])?\s*%\s*(?P<num>{number})",
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalized):
+            value = _normalize_number_value(match.group("num"))
+            if not value:
+                continue
+            comparator = match.groupdict().get("cmp") or ""
+            has_percent = bool(match.groupdict().get("pct")) or "%" in match.group(0)
+
+            keys.add(value)
+            if has_percent:
+                keys.add(f"{value}%")
+                keys.add(f"%{value}")
+
+            if comparator:
+                keys.add(f"{comparator}{value}")
+                if has_percent:
+                    keys.add(f"{comparator}{value}%")
+                    keys.add(f"{comparator}%{value}")
+                    # Comparators are commonly translated as words, while the
+                    # numeric percentage still needs to be preserved.
+                    keys.add(f"{value}%")
+
+    return {key for key in keys if key}
+
+
+def _range_endpoint_keys(token: str) -> Optional[Tuple[Set[str], Set[str]]]:
+    normalized = _normalize_numeric_text(token)
+    if "-" not in normalized:
+        return None
+
+    parts = [part for part in normalized.split("-") if part.strip()]
+    if len(parts) != 2:
+        return None
+
+    return _numeric_match_keys(parts[0]), _numeric_match_keys(parts[1])
+
+
+def _translated_contains_numeric_token(token: str, translated_keys: Set[str]) -> bool:
+    endpoint_keys = _range_endpoint_keys(token)
+    if endpoint_keys:
+        left_keys, right_keys = endpoint_keys
+        return bool(left_keys & translated_keys) and bool(right_keys & translated_keys)
+
+    source_keys = _numeric_match_keys(token)
+    return bool(source_keys & translated_keys)
 
 
 def _leading_layout_marker(text: str) -> str:
@@ -20,11 +115,12 @@ def _leading_layout_marker(text: str) -> str:
 
 
 def _extract_numeric_symbols(text: str) -> List[str]:
-    normalized = text or ""
+    normalized = _normalize_numeric_text(text)
     patterns = [
-        r"[<>≤≥]\s*\d+(?:[.,]\d+)?\s*%?",
+        r"(?:<=|>=|[<>])\s*\d+(?:[\s\u00a0\u202f]?\d{3})*(?:[.,]\d+)?\s*%?",
         r"\d+(?:[.,]\d+)?\s*%",
-        r"\d+(?:[.,]\d+)?\s*[–—-]\s*\d+(?:[.,]\d+)?\s*%?",
+        r"%\s*\d+(?:[.,]\d+)?",
+        r"\d+(?:[.,]\d+)?\s*-\s*\d+(?:[.,]\d+)?\s*%?",
     ]
     tokens: List[str] = []
     for pattern in patterns:
@@ -36,7 +132,7 @@ def _extract_numeric_symbols(text: str) -> List[str]:
 
 
 def _count_suspicious_glyphs(text: str) -> int:
-    suspicious = sum(text.count(glyph) for glyph in SUSPICIOUS_GLYPHS)
+    suspicious = count_suspicious_translation_glyphs(text)
     question_count = text.count("?")
     if question_count >= 6 and question_count / max(len(text), 1) >= 0.03:
         suspicious += question_count
@@ -83,6 +179,7 @@ def _scan_block(block: Dict[str, Any]) -> List[Dict[str, Any]]:
     translated_text = str(block.get("translatedText") or "")
     source_compact = _normalize_token(source_text)
     translated_compact = _normalize_token(translated_text)
+    translated_numeric_keys = _numeric_match_keys(translated_text)
 
     if _block_is_expected_to_translate(block) and not translated_text.strip():
         warnings.append({
@@ -117,7 +214,7 @@ def _scan_block(block: Dict[str, Any]) -> List[Dict[str, Any]]:
     if source_tokens:
         missing_tokens = [
             token for token in source_tokens
-            if token not in translated_compact
+            if not _translated_contains_numeric_token(token, translated_numeric_keys)
         ]
         if missing_tokens:
             warnings.append({

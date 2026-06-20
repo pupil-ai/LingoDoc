@@ -45,3 +45,19 @@ def is_symbol_emoji(char: str) -> bool:
     if ord(char) > 0xFFFF:
         return True
     return unicodedata.category(char) == "So" and char not in MARKER_GLYPHS
+
+
+def is_symbol_emoji_text(text: str) -> bool:
+    clean_text = normalize_pdf_text(text)
+    if not clean_text:
+        return False
+
+    meaningful_chars = [
+        char
+        for char in clean_text
+        if not char.isspace() and char not in {"\ufe0f", "\u200d"}
+    ]
+    if not meaningful_chars:
+        return False
+
+    return all(is_symbol_emoji(char) for char in meaningful_chars)

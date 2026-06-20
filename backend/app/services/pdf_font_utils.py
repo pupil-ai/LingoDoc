@@ -1,4 +1,5 @@
 import os
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,17 @@ def detect_required_scripts(text: str) -> set[str]:
     scripts: set[str] = set()
     for char in text or "":
         codepoint = ord(char)
-        if char.isspace() or char.isdigit() or char in ".,;:!?()[]{}<>\"'`~@#$%^&*-_=+\\/|":
+        category = unicodedata.category(char)
+        if (
+            char.isspace()
+            or char.isdigit()
+            or category[0] in {"P", "Z"}
+            or char in ".,;:!?()[]{}<>\"'`~@#$%^&*-_=+\\/|"
+        ):
+            continue
+        if category[0] == "S":
+            if codepoint > 0xFFFF or 0x2600 <= codepoint <= 0x27BF:
+                scripts.add(SCRIPT_OTHER)
             continue
         if (
             0x4E00 <= codepoint <= 0x9FFF
@@ -124,7 +135,10 @@ def validate_translation_fonts() -> tuple[str, str]:
 
 def resolve_translation_font_paths(required_scripts: set[str]) -> tuple[str, str]:
     if not required_scripts or required_scripts <= {SCRIPT_LATIN}:
-        return "", ""
+        return get_latin_translation_font_paths()
+
+    if required_scripts & {SCRIPT_CJK, SCRIPT_OTHER}:
+        return get_translation_font_paths()
 
     if required_scripts & {SCRIPT_LATIN_EXTENDED, SCRIPT_CYRILLIC, SCRIPT_GREEK}:
         return get_latin_translation_font_paths()

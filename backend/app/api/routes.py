@@ -21,6 +21,7 @@ from app.services.translate_service import (
     get_translation_model_for_plan,
     safe_print,
 )
+from app.services.translation_text_utils import sanitize_translated_text
 from app.services.db_service import db_service
 from app.services.storage_service import storage_service
 from app.services.plan_service import (
@@ -666,7 +667,8 @@ def _normalize_translated_block_text(
     source_text: str,
     target_lang: Optional[str] = None,
 ) -> str:
-    normalized = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", translated_text).strip()
+    normalized = sanitize_translated_text(translated_text)
+    normalized = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", normalized).strip()
     normalized = _restore_reference_markers(normalized, source_text)
     marker = _leading_layout_marker(source_text)
     if marker and normalized and not normalized.startswith(marker):

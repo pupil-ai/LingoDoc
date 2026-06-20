@@ -19,6 +19,8 @@ from app.services.pdf_text_utils import (
     CJK_PUNCTUATION,
     MARKER_GLYPHS,
     has_cjk,
+    is_symbol_emoji,
+    is_symbol_emoji_text,
     normalize_pdf_text,
 )
 from app.services.storage_service import storage_service
@@ -203,6 +205,7 @@ class PDFService(PDFLayoutAnalyzer):
                         "text": span_text,
                         "source_text": text,
                         "is_reference_marker": is_inline_reference_marker,
+                        "char_bboxes": self._span_char_bboxes(span),
                         "bbox": {
                             "x0": span["bbox"][0],
                             "y0": span["bbox"][1],
@@ -672,6 +675,62 @@ class PDFService(PDFLayoutAnalyzer):
 
         return marker, translated
 
+    def _span_char_bboxes(self, span: Dict[str, Any]) -> List[Dict[str, Any]]:
+        char_bboxes: List[Dict[str, Any]] = []
+        for char in span.get("chars") or []:
+            value = str(char.get("c", ""))
+            bbox = char.get("bbox")
+            if not value or bbox is None:
+                continue
+            try:
+                char_bboxes.append({
+                    "char": value,
+                    "bbox": {
+                        "x0": float(bbox[0]),
+                        "y0": float(bbox[1]),
+                        "x1": float(bbox[2]),
+                        "y1": float(bbox[3]),
+                    },
+                })
+            except Exception:
+                continue
+        return char_bboxes
+
+    def _rect_from_bbox_mapping(self, bbox: Dict[str, Any]) -> fitz.Rect:
+        return fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
+
+    def _span_text_rects_without_symbol_emoji(self, span: Dict[str, Any]) -> List[fitz.Rect]:
+        char_rects: List[fitz.Rect] = []
+        for char_info in span.get("char_bboxes") or []:
+            char = str(char_info.get("char") or "")
+            if not char or char in {"\ufe0f", "\u200d"} or is_symbol_emoji(char):
+                continue
+            bbox = char_info.get("bbox")
+            if not bbox:
+                continue
+            try:
+                char_rect = self._rect_from_bbox_mapping(bbox)
+            except Exception:
+                continue
+            if not char_rect.is_empty:
+                char_rects.append(char_rect)
+
+        if char_rects:
+            return char_rects
+
+        span_text = normalize_pdf_text(span.get("text", ""))
+        if not span_text or is_symbol_emoji_text(span_text):
+            return []
+
+        bbox = span.get("bbox")
+        if not bbox:
+            return []
+        try:
+            span_rect = self._rect_from_bbox_mapping(bbox)
+        except Exception:
+            return []
+        return [] if span_rect.is_empty else [span_rect]
+
     def _iter_redaction_rects_for_blocks(self, blocks: List[Dict[str, Any]]) -> List[fitz.Rect]:
         rects: List[fitz.Rect] = []
         for block in blocks or []:
@@ -689,14 +748,7 @@ class PDFService(PDFLayoutAnalyzer):
                 for span in line.get("spans", []):
                     if not normalize_pdf_text(span.get("text", "")):
                         continue
-                    bbox = span.get("bbox")
-                    if not bbox:
-                        continue
-                    try:
-                        span_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
-                    except Exception:
-                        continue
-                    if not span_rect.is_empty:
+                    for span_rect in self._span_text_rects_without_symbol_emoji(span):
                         span_rects.append(span_rect)
 
                 merged_span_rects: List[fitz.Rect] = []
@@ -848,17 +900,7 @@ class PDFService(PDFLayoutAnalyzer):
             for span in line.get("spans", []):
                 if preserve_marker and self._should_preserve_marker_span(span.get("text", "")):
                     continue
-
-                bbox = span.get("bbox")
-                if not bbox:
-                    continue
-
-                try:
-                    span_rect = fitz.Rect(bbox["x0"], bbox["y0"], bbox["x1"], bbox["y1"])
-                except Exception:
-                    continue
-
-                if not span_rect.is_empty:
+                for span_rect in self._span_text_rects_without_symbol_emoji(span):
                     span_rects.append(span_rect)
 
         if not span_rects:

@@ -10,6 +10,7 @@ from app.services.pdf_text_utils import (
     SENTENCE_ENDINGS,
     has_emoji,
     is_symbol_emoji,
+    is_symbol_emoji_text,
     normalize_pdf_text,
 )
 
@@ -405,6 +406,8 @@ class PDFLayoutAnalyzer:
 
     def is_translatable_text_block(self, block: Dict[str, Any]) -> bool:
         if block.get("type") != "text":
+            return False
+        if is_symbol_emoji_text(block.get("text", "")):
             return False
         if block.get("is_chart_text"):
             return False
