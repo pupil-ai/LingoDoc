@@ -135,6 +135,16 @@ export const SUPPORTED_LANGUAGES: LanguageOption[] = [
   { code: 'es', name: 'Spanish (Español)' },
   { code: 'it', name: 'Italian (Italiano)' },
   { code: 'pt', name: 'Portuguese (Português)' },
+  { code: 'de', name: 'German (Deutsch)' },
+  { code: 'nl', name: 'Dutch (Nederlands)' },
+  { code: 'pl', name: 'Polish (Polski)' },
+  { code: 'ru', name: 'Russian (Русский)' },
+  { code: 'uk', name: 'Ukrainian (Українська)' },
+  { code: 'fi', name: 'Finnish (Suomi)' },
+  { code: 'tr', name: 'Turkish (Türkçe)' },
+  { code: 'vi', name: 'Vietnamese (Tiếng Việt)' },
+  { code: 'id', name: 'Indonesian (Bahasa Indonesia)' },
+  { code: 'ms', name: 'Malay (Bahasa Melayu)' },
 ];
 
 export const SUPPORTED_LANGUAGE_CODES = SUPPORTED_LANGUAGES.map((language) => language.code);

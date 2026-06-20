@@ -16,13 +16,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     LOCAL_STORAGE_ROOT=/app/storage \
     LOCAL_STORAGE_CACHE_DIR=/app/tmp/storage-cache \
     PDF_TRANSLATION_FONT_REGULAR=/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
-    PDF_TRANSLATION_FONT_BOLD=/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+    PDF_TRANSLATION_FONT_BOLD=/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc \
+    PDF_TRANSLATION_LATIN_FONT_REGULAR=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+    PDF_TRANSLATION_LATIN_FONT_BOLD=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
 
 WORKDIR /app
 
 RUN rm -f /etc/apt/sources.list.d/*yarn* \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates fonts-noto-cjk \
+    && apt-get install -y --no-install-recommends ca-certificates fonts-dejavu-core fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

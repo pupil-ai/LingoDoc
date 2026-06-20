@@ -19,6 +19,8 @@ services:
       LOCAL_STORAGE_CACHE_DIR: /app/tmp/storage-cache
       PDF_TRANSLATION_FONT_REGULAR: /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc
       PDF_TRANSLATION_FONT_BOLD: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
+      PDF_TRANSLATION_LATIN_FONT_REGULAR: /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+      PDF_TRANSLATION_LATIN_FONT_BOLD: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
     volumes:
       - ./backend/data:/app/data
       - ./backend/uploads:/app/storage/uploads

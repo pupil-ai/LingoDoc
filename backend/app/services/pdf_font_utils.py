@@ -4,6 +4,7 @@ from typing import Any
 
 
 SCRIPT_LATIN = "latin"
+SCRIPT_LATIN_EXTENDED = "latin_extended"
 SCRIPT_CYRILLIC = "cyrillic"
 SCRIPT_GREEK = "greek"
 SCRIPT_CJK = "cjk"
@@ -12,6 +13,8 @@ SCRIPT_OTHER = "other"
 
 TRANSLATION_FONT_REGULAR_ENV = "PDF_TRANSLATION_FONT_REGULAR"
 TRANSLATION_FONT_BOLD_ENV = "PDF_TRANSLATION_FONT_BOLD"
+TRANSLATION_LATIN_FONT_REGULAR_ENV = "PDF_TRANSLATION_LATIN_FONT_REGULAR"
+TRANSLATION_LATIN_FONT_BOLD_ENV = "PDF_TRANSLATION_LATIN_FONT_BOLD"
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -36,8 +39,10 @@ def detect_required_scripts(text: str) -> set[str]:
             scripts.add(SCRIPT_CYRILLIC)
         elif 0x0370 <= codepoint <= 0x03FF:
             scripts.add(SCRIPT_GREEK)
-        elif codepoint <= 0x024F or 0x1E00 <= codepoint <= 0x1EFF:
+        elif codepoint <= 0x00FF:
             scripts.add(SCRIPT_LATIN)
+        elif codepoint <= 0x024F or 0x1E00 <= codepoint <= 0x1EFF:
+            scripts.add(SCRIPT_LATIN_EXTENDED)
         else:
             scripts.add(SCRIPT_OTHER)
     return scripts
@@ -76,28 +81,43 @@ def get_translation_font_paths() -> tuple[str, str]:
     return regular_font_path, bold_font_path
 
 
-def validate_translation_fonts() -> tuple[str, str]:
-    regular_font_path, bold_font_path = get_translation_font_paths()
+def get_latin_translation_font_paths() -> tuple[str, str]:
+    regular_font_path = _resolve_configured_font_path(TRANSLATION_LATIN_FONT_REGULAR_ENV)
+    bold_font_path = _resolve_configured_font_path(TRANSLATION_LATIN_FONT_BOLD_ENV)
+    return regular_font_path, bold_font_path
 
+
+def _validate_font_pair(label: str, regular_font_path: str, bold_font_path: str) -> None:
     try:
         import fitz
 
         doc = fitz.open()
         try:
             page = doc.new_page()
-            page.insert_font(fontfile=regular_font_path, fontname="translation_regular_validation")
-            page.insert_font(fontfile=bold_font_path, fontname="translation_bold_validation")
+            safe_label = "".join(char if char.isalnum() else "_" for char in label)
+            page.insert_font(fontfile=regular_font_path, fontname=f"{safe_label}_regular_validation")
+            page.insert_font(fontfile=bold_font_path, fontname=f"{safe_label}_bold_validation")
         finally:
             doc.close()
     except Exception as exc:
         raise TranslationFontConfigurationError(
-            "Configured PDF translation fonts could not be registered by PyMuPDF: "
+            f"Configured PDF translation fonts for {label} could not be registered by PyMuPDF: "
             f"{regular_font_path}, {bold_font_path}. Error: {exc}"
         ) from exc
 
+
+def validate_translation_fonts() -> tuple[str, str]:
+    regular_font_path, bold_font_path = get_translation_font_paths()
+    _validate_font_pair("default", regular_font_path, bold_font_path)
+
+    latin_regular_font_path, latin_bold_font_path = get_latin_translation_font_paths()
+    _validate_font_pair("latin", latin_regular_font_path, latin_bold_font_path)
+
     print(
         "[STARTUP] PDF translation fonts ready: "
-        f"regular={regular_font_path} bold={bold_font_path}"
+        f"regular={regular_font_path} bold={bold_font_path} "
+        f"latin_regular={latin_regular_font_path} "
+        f"latin_bold={latin_bold_font_path}"
     )
     return regular_font_path, bold_font_path
 
@@ -105,5 +125,8 @@ def validate_translation_fonts() -> tuple[str, str]:
 def resolve_translation_font_paths(required_scripts: set[str]) -> tuple[str, str]:
     if not required_scripts or required_scripts <= {SCRIPT_LATIN}:
         return "", ""
+
+    if required_scripts & {SCRIPT_LATIN_EXTENDED, SCRIPT_CYRILLIC, SCRIPT_GREEK}:
+        return get_latin_translation_font_paths()
 
     return get_translation_font_paths()

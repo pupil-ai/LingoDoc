@@ -8,7 +8,52 @@ import sys
 import aiohttp
 
 
-SUPPORTED_LANGUAGE_CODES = ["en", "zh", "ja", "ko", "es", "fr", "it", "pt"]
+SUPPORTED_LANGUAGE_CODES = [
+    "en",
+    "zh",
+    "ja",
+    "ko",
+    "es",
+    "fr",
+    "it",
+    "pt",
+    "de",
+    "nl",
+    "pl",
+    "ru",
+    "uk",
+    "fi",
+    "tr",
+    "vi",
+    "id",
+    "ms",
+]
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "zh": "Simplified Chinese (简体中文)",
+    "ja": "Japanese (日本語)",
+    "ko": "Korean (한국어)",
+    "es": "Spanish (Español)",
+    "fr": "French (Français)",
+    "it": "Italian (Italiano)",
+    "pt": "Portuguese (Português)",
+    "de": "German (Deutsch)",
+    "nl": "Dutch (Nederlands)",
+    "pl": "Polish (Polski)",
+    "ru": "Russian (Русский)",
+    "uk": "Ukrainian (Українська)",
+    "fi": "Finnish (Suomi)",
+    "tr": "Turkish (Türkçe)",
+    "vi": "Vietnamese (Tiếng Việt)",
+    "id": "Indonesian (Bahasa Indonesia)",
+    "ms": "Malay (Bahasa Melayu)",
+}
+
+
+def _language_name(lang: str) -> str:
+    normalized = (lang or "").strip().lower()
+    return LANGUAGE_NAMES.get(normalized, lang)
 
 
 def safe_print(msg: str) -> None:
@@ -62,14 +107,16 @@ class AioHttpTranslationService(TranslationService):
 
 
 def _build_translation_messages(payload: str, source_lang: str, target_lang: str) -> List[Dict[str, str]]:
+    source_label = _language_name(source_lang)
+    target_label = _language_name(target_lang)
     return [
         {
             "role": "system",
             "content": (
                 f"You are a professional, neutral translator.\n\n"
                 f"Translation guidelines:\n"
-                f"1. Translate from {source_lang} to {target_lang} naturally and fluently.\n"
-                f"2. Keep proper nouns, brand names, product names, and technical terms in their original form if they are commonly used in {target_lang}.\n"
+                f"1. Translate all translatable content from {source_label} to {target_label} naturally and fluently.\n"
+                f"2. Do not leave source-language phrases untranslated unless they are proper nouns, brand names, product names, abbreviations, citations, or technical terms commonly used in {target_label}.\n"
                 f"3. Maintain the original tone and style.\n"
                 f"4. Preserve layout markers such as line breaks, bullets, numbering, emoji, and leading symbols.\n"
                 f"5. Do not add explanations, notes, glosses, or parenthetical original terms unless they already exist in the source text.\n"
