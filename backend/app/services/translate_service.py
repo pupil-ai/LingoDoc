@@ -8,6 +8,9 @@ import sys
 import aiohttp
 
 
+SUPPORTED_LANGUAGE_CODES = ["en", "zh", "ja", "ko", "es", "fr", "it", "pt"]
+
+
 def safe_print(msg: str) -> None:
     """Print safely on Windows terminals that may not support every character."""
     try:
@@ -181,7 +184,7 @@ class DeepLService(AioHttpTranslationService):
             return result["translations"][0]["text"]
 
     def get_supported_languages(self) -> List[str]:
-        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+        return list(SUPPORTED_LANGUAGE_CODES)
 
 
 class GoogleTranslateService(AioHttpTranslationService):
@@ -208,7 +211,7 @@ class GoogleTranslateService(AioHttpTranslationService):
             return result["data"]["translations"][0]["translatedText"]
 
     def get_supported_languages(self) -> List[str]:
-        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+        return list(SUPPORTED_LANGUAGE_CODES)
 
 
 class OpenAIService(AioHttpTranslationService):
@@ -260,7 +263,7 @@ class OpenAIService(AioHttpTranslationService):
         return await self.translate_structured_batch(items, source_lang, target_lang)
 
     def get_supported_languages(self) -> List[str]:
-        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+        return list(SUPPORTED_LANGUAGE_CODES)
 
 
 class OfoxAIService(AioHttpTranslationService):
@@ -386,7 +389,7 @@ class OfoxAIService(AioHttpTranslationService):
         return _parse_batch_translations(raw_response, len(items))
 
     def get_supported_languages(self) -> List[str]:
-        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+        return list(SUPPORTED_LANGUAGE_CODES)
 
 
 def get_translation_model_for_plan(plan: Optional[str]) -> str:
@@ -404,7 +407,7 @@ class MockTranslationService(TranslationService):
         return f"[{target_lang}: {text}]"
 
     def get_supported_languages(self) -> List[str]:
-        return ["en", "zh", "ja", "ko", "fr", "de", "es", "ru"]
+        return list(SUPPORTED_LANGUAGE_CODES)
 
 
 class TranslationServiceFactory:

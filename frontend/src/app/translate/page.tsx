@@ -18,6 +18,7 @@ import {
   startExportJob,
   startTranslation,
 } from '@/lib/api';
+import { SUPPORTED_LANGUAGE_CODES, SUPPORTED_LANGUAGE_LABELS } from '@/types';
 import type { TranslationProgress, TranslationResult, UsageResponse } from '@/types';
 
 type DownloadType = 'bilingual' | 'translated';
@@ -44,6 +45,9 @@ const TRANSLATE_VIEW_COPY: Record<TranslateViewState, { title: string; descripti
   },
 };
 
+const DEFAULT_SOURCE_LANG = 'en';
+const DEFAULT_TARGET_LANG = 'zh';
+
 function ClerkSetupRequired() {
   return (
     <div className="app-shell">
@@ -68,17 +72,11 @@ function formatPlanName(plan: string | undefined): string {
 }
 
 function labelForLang(code: string): string {
-  const labels: Record<string, string> = {
-    en: 'English',
-    zh: 'Chinese',
-    ja: 'Japanese',
-    ko: 'Korean',
-    fr: 'French',
-    de: 'German',
-    es: 'Spanish',
-    ru: 'Russian',
-  };
-  return labels[code] || code.toUpperCase();
+  return SUPPORTED_LANGUAGE_LABELS[code] || code.toUpperCase();
+}
+
+function normalizeSupportedLang(code: string | null, fallback: string): string {
+  return code && SUPPORTED_LANGUAGE_CODES.includes(code) ? code : fallback;
 }
 
 function formatPageCount(count: number): string {
@@ -497,8 +495,8 @@ function TranslatePageContent() {
   const initialTotalPages = Number(searchParams.get('totalPages') || '0');
   const initialTaskId = searchParams.get('taskId');
   const initialTaskStatus = searchParams.get('status');
-  const initialSourceLang = searchParams.get('sourceLang') || 'en';
-  const initialTargetLang = searchParams.get('targetLang') || 'zh';
+  const initialSourceLang = normalizeSupportedLang(searchParams.get('sourceLang'), DEFAULT_SOURCE_LANG);
+  const initialTargetLang = normalizeSupportedLang(searchParams.get('targetLang'), DEFAULT_TARGET_LANG);
 
   const [sourceLang, setSourceLang] = useState(initialSourceLang);
   const [targetLang, setTargetLang] = useState(initialTargetLang);

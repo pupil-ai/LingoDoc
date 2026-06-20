@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 from app.services.pdf_service import PDFService
 from app.services.pdf_quality_service import build_pdf_quality_report
 from app.services.translate_service import (
+    SUPPORTED_LANGUAGE_CODES,
     TranslationServiceFactory,
     get_translation_model_for_plan,
     safe_print,
@@ -88,6 +89,20 @@ class TranslationRequest(BaseModel):
     fileId: str
     sourceLang: str
     targetLang: str
+
+
+SUPPORTED_LANGUAGE_SET = set(SUPPORTED_LANGUAGE_CODES)
+
+
+def _normalize_supported_language(lang: str, field_name: str) -> str:
+    normalized = (lang or "").strip().lower()
+    if normalized not in SUPPORTED_LANGUAGE_SET:
+        supported = ", ".join(SUPPORTED_LANGUAGE_CODES)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported {field_name}. Supported languages: {supported}",
+        )
+    return normalized
 
 
 class ExportJobRequest(BaseModel):
@@ -1383,6 +1398,8 @@ async def start_translation(
 ):
     _sync_current_user(current_user)
     _ensure_file_owner(request.fileId, current_user.id)
+    source_lang = _normalize_supported_language(request.sourceLang, "sourceLang")
+    target_lang = _normalize_supported_language(request.targetLang, "targetLang")
 
     try:
         total_pages = pdf_service.get_total_pages(request.fileId)
@@ -1392,8 +1409,8 @@ async def start_translation(
     resumable_task = db_service.find_resumable_translation_task(
         file_id=request.fileId,
         user_id=current_user.id,
-        source_lang=request.sourceLang,
-        target_lang=request.targetLang,
+        source_lang=source_lang,
+        target_lang=target_lang,
     )
     if resumable_task:
         task_id = str(resumable_task["id"])
@@ -1423,8 +1440,8 @@ async def start_translation(
                 translate_pdf_task,
                 task_id,
                 request.fileId,
-                request.sourceLang,
-                request.targetLang,
+                source_lang,
+                target_lang,
                 current_user.id,
                 requested_pages,
                 plan_metadata,
@@ -1449,15 +1466,15 @@ async def start_translation(
         task_id=task_id,
         file_id=request.fileId,
         user_id=current_user.id,
-        source_lang=request.sourceLang,
-        target_lang=request.targetLang,
+        source_lang=source_lang,
+        target_lang=target_lang,
     )
     background_tasks.add_task(
         translate_pdf_task,
         task_id,
         request.fileId,
-        request.sourceLang,
-        request.targetLang,
+        source_lang,
+        target_lang,
         current_user.id,
         pages_to_translate,
         plan_metadata,
